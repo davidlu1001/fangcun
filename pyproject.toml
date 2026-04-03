@@ -9,6 +9,7 @@ dependencies = [
     "fake-useragent>=1.4",
     "gradio>=6.11.0",
     "numpy>=2.4.4",
+    "opencc-python-reimplemented>=0.1.7",
     "opencv-python>=4.13.0.92",
     "pillow>=12.2.0",
     "pycryptodome>=3.23.0",

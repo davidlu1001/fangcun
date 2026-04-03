@@ -60,6 +60,13 @@ try:
 except Exception:
     _ua = None
 
+try:
+    from opencc import OpenCC
+
+    _s2t = OpenCC("s2t")
+except Exception:
+    _s2t = None
+
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path.home() / ".seal_gen" / "cache"
@@ -73,14 +80,22 @@ TAB_PRIORITY: list[tuple[str, int]] = [
     ("真迹", 2),  # original calligraphy scans
 ]
 
+# Fallback font search order: serif (宋体) before sans-serif (黑体).
+# Sans-serif looks too "digital" for seal context.
 _FONT_SEARCH_PATHS = [
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    # Serif / Song — preferred for seal fallback (more traditional feel)
+    "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSerifCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/adobe/SourceHanSerif-Regular.ttc",
+    "/usr/share/fonts/truetype/source-han-serif/SourceHanSerifSC-Regular.otf",
+    "C:\\Windows\\Fonts\\simsun.ttc",
+    "/System/Library/Fonts/Songti.ttc",
+    # Sans-serif fallback (still better than nothing)
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",
     "/System/Library/Fonts/PingFang.ttc",
-    "/System/Library/Fonts/STHeiti Medium.ttc",
-    "C:\\Windows\\Fonts\\simsun.ttc",
     "C:\\Windows\\Fonts\\msyh.ttc",
 ]
 
@@ -98,6 +113,7 @@ def _find_system_font() -> Optional[str]:
             _system_font_path = p
             return p
 
+    # Prefer serif fonts from fc-list (Serif/Song/Ming before Sans)
     try:
         result = subprocess.run(
             ["fc-list", ":lang=zh", "-f", "%{file}\n"],
@@ -106,12 +122,27 @@ def _find_system_font() -> Optional[str]:
             timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
-            _system_font_path = result.stdout.strip().split("\n")[0]
+            fonts = result.stdout.strip().split("\n")
+            # Prefer serif/song fonts
+            for f in fonts:
+                fl = f.lower()
+                if any(k in fl for k in ("serif", "song", "ming", "宋")):
+                    _system_font_path = f
+                    return f
+            _system_font_path = fonts[0]
             return _system_font_path
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
     return None
+
+
+def _to_traditional(char: str) -> Optional[str]:
+    """Convert simplified Chinese character to traditional form, or None if same."""
+    if _s2t is None:
+        return None
+    trad = _s2t.convert(char)
+    return trad if trad != char else None
 
 
 def _random_ua() -> str:
@@ -290,22 +321,40 @@ class CalligraphyScraper:
     ) -> tuple[Optional[Image.Image], str]:
         """
         Try each tab (字典→真迹) via cache then web.
+        If the character isn't found, also try its traditional form
+        (e.g. 苏→蘇) since ygsf.com primarily indexes traditional characters.
 
         Returns: (image, tab_source) or (None, '')
         """
-        for tab_name, tab_type in TAB_PRIORITY:
-            # Cache check
-            cached = self._load_cache(char, font_style, tab_name)
-            if cached is not None:
-                logger.info("Cache hit: '%s' in %s/%s", char, font_style, tab_name)
-                return cached, tab_name
+        # Try original character, then traditional variant
+        chars_to_try = [char]
+        trad = _to_traditional(char)
+        if trad is not None:
+            chars_to_try.append(trad)
 
-            # Web fetch
-            img = self._fetch_from_web(char, font_style, tab_type)
-            if img is not None:
-                self._save_cache(char, font_style, tab_name, img)
-                logger.info("Fetched '%s' in %s/%s", char, font_style, tab_name)
-                return img, tab_name
+        for try_char in chars_to_try:
+            for tab_name, tab_type in TAB_PRIORITY:
+                # Cache check (cache under original char so both forms share it)
+                cached = self._load_cache(char, font_style, tab_name)
+                if cached is not None:
+                    logger.info("Cache hit: '%s' in %s/%s", char, font_style, tab_name)
+                    return cached, tab_name
+
+                # Web fetch
+                img = self._fetch_from_web(try_char, font_style, tab_type)
+                if img is not None:
+                    self._save_cache(char, font_style, tab_name, img)
+                    if try_char != char:
+                        logger.info(
+                            "Fetched '%s' (繁体'%s') in %s/%s",
+                            char, try_char, font_style, tab_name,
+                        )
+                    else:
+                        logger.info("Fetched '%s' in %s/%s", char, font_style, tab_name)
+                    return img, tab_name
+
+            if try_char != char:
+                logger.debug("Traditional '%s' also not found in %s", try_char, font_style)
 
         return None, ""
 
@@ -491,9 +540,26 @@ class CalligraphyScraper:
         Detect dark-background images (印谱/seal impression scans)
         and auto-invert to white-background for consistent downstream processing.
 
-        Detection: center-region average brightness < 80.
+        Detection: composite onto white first (so transparent pixels read as
+        white, not black), then check center-region average brightness < 80.
+
+        IMPORTANT: raw RGBA→L ignores alpha, so transparent PNGs with
+        RGB=(0,0,0) everywhere falsely trigger inversion. Must composite first.
         """
-        gray = np.array(img.convert("L"))
+        # RGBA with significant transparency → already has clean background,
+        # never a dark-background scan. Skip inversion entirely.
+        if img.mode == "RGBA":
+            alpha = np.array(img.split()[3])
+            transparent_ratio = float((alpha == 0).sum()) / alpha.size
+            if transparent_ratio > 0.10:
+                return img
+            # Opaque RGBA — composite onto white for brightness check
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            gray = np.array(bg.convert("L"))
+        else:
+            gray = np.array(img.convert("L"))
+
         h, w = gray.shape
         margin = min(h, w) // 4
         cy, cx = h // 2, w // 2

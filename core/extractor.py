@@ -20,9 +20,9 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Quality bounds: stroke coverage ratio
-_MIN_COVERAGE = 0.05
-_MAX_COVERAGE = 0.95
+# Validity: absolute pixel count threshold (not percentage — percentage
+# fails for characters like "一" where bbox is extremely thin after crop).
+_MIN_STROKE_PIXELS = 50
 
 
 class CharExtractor:
@@ -55,12 +55,13 @@ class CharExtractor:
             # (hollow outlines instead of solid fills).
             binary = self._binarize_otsu(gray)
 
-        # Quality check — retry with Otsu if adaptive produced bad result
-        coverage = np.count_nonzero(binary) / binary.size
-        if coverage < _MIN_COVERAGE or coverage > _MAX_COVERAGE:
+        # Quality check — use absolute pixel count, not percentage.
+        # Percentage fails for "一" etc. where bbox is extremely thin.
+        stroke_pixels = int(np.count_nonzero(binary))
+        if stroke_pixels < _MIN_STROKE_PIXELS:
             logger.info(
-                "Coverage %.1f%% out of range (source=%s), retrying with Otsu",
-                coverage * 100,
+                "Only %d stroke pixels (source=%s), retrying with Otsu",
+                stroke_pixels,
                 source,
             )
             binary = self._binarize_otsu(gray)
