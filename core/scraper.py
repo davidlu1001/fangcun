@@ -151,7 +151,7 @@ class CalligraphyScraper:
         self, char: str, seal_type: str
     ) -> tuple[Image.Image, str, bool]:
         """
-        Fetch calligraphy image for one character.
+        Fetch calligraphy image for one character (independent mode).
 
         Returns:
             (image, font_name_used, was_fallback)
@@ -160,21 +160,120 @@ class CalligraphyScraper:
         priority = self.FONT_PRIORITY.get(seal_type, ["篆", "隶", "楷"])
 
         for idx, font_style in enumerate(priority):
-            cached = self._load_cache(char, font_style)
-            if cached is not None:
-                logger.info("Cache hit: '%s' in %s", char, font_style)
-                return cached, font_style, idx > 0
-
-            img = self._fetch_from_web(char, font_style)
+            img = self._get_or_fetch(char, font_style)
             if img is not None:
-                self._save_cache(char, font_style, img)
                 return img, font_style, idx > 0
 
             logger.warning("'%s' not found in %s, trying next font...", char, font_style)
 
         logger.warning("All web fonts exhausted for '%s', using local fallback", char)
         img = self._render_local_fallback(char)
-        return img, f"本地字体(兜底)", True
+        return img, "本地字体(兜底)", True
+
+    def fetch_chars_consistent(
+        self, text: str, seal_type: str
+    ) -> tuple[list[Image.Image], str, bool, list[str]]:
+        """
+        Fetch images for ALL characters, enforcing same-style consistency.
+
+        金石学原则：同一方印章内所有字必须同一书体。
+        Strategy:
+          1. Try each font style in priority order for ALL chars at once.
+             If a style covers every character → use it.
+          2. If no single style covers all → use the style with best coverage,
+             fill gaps with next-best available style, and warn about mixing.
+
+        Returns:
+            (images, font_name_used, was_fallback, warnings)
+        """
+        priority = self.FONT_PRIORITY.get(seal_type, ["篆", "隶", "楷"])
+        warnings: list[str] = []
+
+        # ── Pass 1: find a style that covers ALL characters ──
+        for idx, font_style in enumerate(priority):
+            images: list[Image.Image] = []
+            all_found = True
+
+            for char in text:
+                img = self._get_or_fetch(char, font_style)
+                if img is None:
+                    all_found = False
+                    logger.info("'%s' not available in %s", char, font_style)
+                    break
+                images.append(img)
+
+            if all_found:
+                if idx > 0:
+                    warnings.append(
+                        f"首选{priority[0]}中部分字缺失，全部统一使用{font_style}"
+                    )
+                return images, font_style, idx > 0, warnings
+
+        # ── Pass 2: no single style covers all — find best coverage ──
+        logger.warning("No single font style covers all chars in '%s'", text)
+
+        # Build availability matrix: {style: {char: Image|None}}
+        availability: dict[str, dict[str, Optional[Image.Image]]] = {}
+        for font_style in priority:
+            availability[font_style] = {}
+            for char in text:
+                availability[font_style][char] = self._get_or_fetch(char, font_style)
+
+        # Pick the style that covers the most characters
+        best_style = priority[0]
+        best_count = 0
+        for font_style in priority:
+            count = sum(1 for img in availability[font_style].values() if img is not None)
+            if count > best_count:
+                best_count = count
+                best_style = font_style
+
+        # Assemble: use best_style where possible, fill gaps from other styles
+        images = []
+        mixed_chars: list[str] = []
+
+        for char in text:
+            img = availability[best_style].get(char)
+            if img is not None:
+                images.append(img)
+                continue
+
+            # Try other styles for this character
+            found = False
+            for alt_style in priority:
+                if alt_style == best_style:
+                    continue
+                alt_img = availability[alt_style].get(char)
+                if alt_img is not None:
+                    images.append(alt_img)
+                    mixed_chars.append(f"'{char}'→{alt_style}")
+                    found = True
+                    break
+
+            if not found:
+                images.append(self._render_local_fallback(char))
+                mixed_chars.append(f"'{char}'→本地字体")
+
+        warnings.append(
+            f"书体不统一：主体{best_style}，但 {', '.join(mixed_chars)}"
+        )
+        return images, best_style, True, warnings
+
+    # ── cache-then-web helper ───────────────────────────────
+
+    def _get_or_fetch(self, char: str, font_style: str) -> Optional[Image.Image]:
+        """Try cache first, then web. Returns image or None."""
+        cached = self._load_cache(char, font_style)
+        if cached is not None:
+            logger.info("Cache hit: '%s' in %s", char, font_style)
+            return cached
+
+        img = self._fetch_from_web(char, font_style)
+        if img is not None:
+            self._save_cache(char, font_style, img)
+            return img
+
+        return None
 
     # ── web fetch ────────────────────────────────────────────
 

@@ -82,25 +82,17 @@ class SealGenerator:
         if len(text) > 4:
             warnings.append(f"超过4字 ({len(text)}字), 将自动缩小适配")
 
-        # ── 1. Fetch character images ────────────────────────
-        fonts_used: list[str] = []
-        raw_images: list[Image.Image] = []
-        any_fallback = False
-
-        for char in text:
-            img, font_name, was_fallback = self._scraper.fetch_char_image(
-                char, seal_type
-            )
-            raw_images.append(img)
-            fonts_used.append(font_name)
-            if was_fallback:
-                any_fallback = True
-
-        # Summarize font info
-        unique_fonts = list(dict.fromkeys(fonts_used))  # preserves order
-        font_display = "、".join(unique_fonts)
-        if any_fallback:
-            warnings.append(f"部分字体已降级: {font_display}")
+        # ── 1. Fetch character images (consistency-first) ────
+        #
+        # 金石学原则：同一方印所有字必须同一书体。
+        # fetch_chars_consistent tries each priority style for ALL
+        # characters before falling back, so "禅宗" won't mix 篆+隶.
+        #
+        raw_images, font_used, any_fallback, fetch_warnings = (
+            self._scraper.fetch_chars_consistent(text, seal_type)
+        )
+        warnings.extend(fetch_warnings)
+        font_display = font_used
 
         # ── 2. Extract character masks ───────────────────────
         masks = [self._extractor.extract(img) for img in raw_images]
