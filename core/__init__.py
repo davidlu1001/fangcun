@@ -88,14 +88,20 @@ class SealGenerator:
         # fetch_chars_consistent tries each priority style for ALL
         # characters before falling back, so "禅宗" won't mix 篆+隶.
         #
-        raw_images, font_used, any_fallback, fetch_warnings = (
+        # Tab priority per font style: 字典 → 真迹 (不用字库).
+        # Tab source affects extractor preprocessing intensity.
+        #
+        raw_images, font_used, any_fallback, tab_sources, fetch_warnings = (
             self._scraper.fetch_chars_consistent(text, seal_type)
         )
         warnings.extend(fetch_warnings)
         font_display = font_used
 
-        # ── 2. Extract character masks ───────────────────────
-        masks = [self._extractor.extract(img) for img in raw_images]
+        # ── 2. Extract character masks (source-aware) ────────
+        masks = [
+            self._extractor.extract(img, source=src)
+            for img, src in zip(raw_images, tab_sources)
+        ]
 
         # ── 3. Layout ────────────────────────────────────────
         ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(shape, size)

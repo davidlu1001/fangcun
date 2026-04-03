@@ -16,13 +16,18 @@ Image CDN: https://ygsf.cdn.bcebos.com/
 Params for /glyph/query:
   key (str)     : character to search, e.g. "永"
   kind (int)    : 1 = brush calligraphy
-  type (int)    : 2 (default)
+  type (int)    : tab selector — 3=字典, 2=真迹, 1=字库
   font (str)    : "楷" | "行" | "草" | "隶" | "篆"
   author (str)  : filter by calligrapher, "" = all
   orderby (str) : "hot" for popularity sort
   strict (int)  : 1 = exact match
   loaded (int)  : pagination offset (page size = 120)
   _plat, _channel, _brand, _token : metadata fields
+
+Tab priority (per 金石学 standards):
+  字典 (type=3) — dictionary/seal-reference entries, clean B&W, ideal for seals
+  真迹 (type=2) — original calligraphy scans, noisier, needs enhanced denoising
+  字库 (type=1) — digital font glyphs, NEVER used (vector edges unusable)
 """
 
 from __future__ import annotations
@@ -60,6 +65,13 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = Path.home() / ".seal_gen" / "cache"
 API_BASE = "https://api.ygsf.com/v2.4"
 AES_KEY = b"PkT!ihpN^QkQ62k%"
+
+# Tab priority: 字典 first (clean, seal-optimized), 真迹 second (original, noisier).
+# 字库 (type=1) is deliberately excluded — digital font glyphs are unusable.
+TAB_PRIORITY: list[tuple[str, int]] = [
+    ("字典", 3),  # dictionary / seal-reference entries
+    ("真迹", 2),  # original calligraphy scans
+]
 
 _FONT_SEARCH_PATHS = [
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -149,34 +161,36 @@ class CalligraphyScraper:
 
     def fetch_char_image(
         self, char: str, seal_type: str
-    ) -> tuple[Image.Image, str, bool]:
+    ) -> tuple[Image.Image, str, str, bool]:
         """
         Fetch calligraphy image for one character (independent mode).
 
         Returns:
-            (image, font_name_used, was_fallback)
-            was_fallback is True if the font is not the first-priority choice.
+            (image, font_name_used, tab_source, was_fallback)
+            tab_source: '字典' | '真迹' | '本地'
         """
         priority = self.FONT_PRIORITY.get(seal_type, ["篆", "隶", "楷"])
 
         for idx, font_style in enumerate(priority):
-            img = self._get_or_fetch(char, font_style)
+            img, tab = self._get_or_fetch(char, font_style)
             if img is not None:
-                return img, font_style, idx > 0
+                return img, font_style, tab, idx > 0
 
             logger.warning("'%s' not found in %s, trying next font...", char, font_style)
 
         logger.warning("All web fonts exhausted for '%s', using local fallback", char)
         img = self._render_local_fallback(char)
-        return img, "本地字体(兜底)", True
+        return img, "本地字体(兜底)", "本地", True
 
     def fetch_chars_consistent(
         self, text: str, seal_type: str
-    ) -> tuple[list[Image.Image], str, bool, list[str]]:
+    ) -> tuple[list[Image.Image], str, bool, list[str], list[str]]:
         """
         Fetch images for ALL characters, enforcing same-style consistency.
 
         金石学原则：同一方印章内所有字必须同一书体。
+        查找顺序：对每个字体级别（篆→隶→楷），先查字典tab→再查真迹tab→不查字库。
+
         Strategy:
           1. Try each font style in priority order for ALL chars at once.
              If a style covers every character → use it.
@@ -184,7 +198,8 @@ class CalligraphyScraper:
              fill gaps with next-best available style, and warn about mixing.
 
         Returns:
-            (images, font_name_used, was_fallback, warnings)
+            (images, font_name_used, was_fallback, tab_sources, warnings)
+            tab_sources: per-character list of '字典' | '真迹' | '本地'
         """
         priority = self.FONT_PRIORITY.get(seal_type, ["篆", "隶", "楷"])
         warnings: list[str] = []
@@ -192,50 +207,57 @@ class CalligraphyScraper:
         # ── Pass 1: find a style that covers ALL characters ──
         for idx, font_style in enumerate(priority):
             images: list[Image.Image] = []
+            sources: list[str] = []
             all_found = True
 
             for char in text:
-                img = self._get_or_fetch(char, font_style)
+                img, tab = self._get_or_fetch(char, font_style)
                 if img is None:
                     all_found = False
                     logger.info("'%s' not available in %s", char, font_style)
                     break
                 images.append(img)
+                sources.append(tab)
 
             if all_found:
                 if idx > 0:
                     warnings.append(
                         f"首选{priority[0]}中部分字缺失，全部统一使用{font_style}"
                     )
-                return images, font_style, idx > 0, warnings
+                return images, font_style, idx > 0, sources, warnings
 
         # ── Pass 2: no single style covers all — find best coverage ──
         logger.warning("No single font style covers all chars in '%s'", text)
 
-        # Build availability matrix: {style: {char: Image|None}}
-        availability: dict[str, dict[str, Optional[Image.Image]]] = {}
+        # Build availability matrix: {style: {char: (Image|None, tab)}}
+        availability: dict[str, dict[str, tuple[Optional[Image.Image], str]]] = {}
         for font_style in priority:
             availability[font_style] = {}
             for char in text:
-                availability[font_style][char] = self._get_or_fetch(char, font_style)
+                img, tab = self._get_or_fetch(char, font_style)
+                availability[font_style][char] = (img, tab)
 
         # Pick the style that covers the most characters
         best_style = priority[0]
         best_count = 0
         for font_style in priority:
-            count = sum(1 for img in availability[font_style].values() if img is not None)
+            count = sum(
+                1 for img, _ in availability[font_style].values() if img is not None
+            )
             if count > best_count:
                 best_count = count
                 best_style = font_style
 
         # Assemble: use best_style where possible, fill gaps from other styles
         images = []
+        sources = []
         mixed_chars: list[str] = []
 
         for char in text:
-            img = availability[best_style].get(char)
+            img, tab = availability[best_style][char]
             if img is not None:
                 images.append(img)
+                sources.append(tab)
                 continue
 
             # Try other styles for this character
@@ -243,46 +265,60 @@ class CalligraphyScraper:
             for alt_style in priority:
                 if alt_style == best_style:
                     continue
-                alt_img = availability[alt_style].get(char)
+                alt_img, alt_tab = availability[alt_style][char]
                 if alt_img is not None:
                     images.append(alt_img)
+                    sources.append(alt_tab)
                     mixed_chars.append(f"'{char}'→{alt_style}")
                     found = True
                     break
 
             if not found:
                 images.append(self._render_local_fallback(char))
+                sources.append("本地")
                 mixed_chars.append(f"'{char}'→本地字体")
 
         warnings.append(
             f"书体不统一：主体{best_style}，但 {', '.join(mixed_chars)}"
         )
-        return images, best_style, True, warnings
+        return images, best_style, True, sources, warnings
 
     # ── cache-then-web helper ───────────────────────────────
 
-    def _get_or_fetch(self, char: str, font_style: str) -> Optional[Image.Image]:
-        """Try cache first, then web. Returns image or None."""
-        cached = self._load_cache(char, font_style)
-        if cached is not None:
-            logger.info("Cache hit: '%s' in %s", char, font_style)
-            return cached
+    def _get_or_fetch(
+        self, char: str, font_style: str
+    ) -> tuple[Optional[Image.Image], str]:
+        """
+        Try each tab (字典→真迹) via cache then web.
 
-        img = self._fetch_from_web(char, font_style)
-        if img is not None:
-            self._save_cache(char, font_style, img)
-            return img
+        Returns: (image, tab_source) or (None, '')
+        """
+        for tab_name, tab_type in TAB_PRIORITY:
+            # Cache check
+            cached = self._load_cache(char, font_style, tab_name)
+            if cached is not None:
+                logger.info("Cache hit: '%s' in %s/%s", char, font_style, tab_name)
+                return cached, tab_name
 
-        return None
+            # Web fetch
+            img = self._fetch_from_web(char, font_style, tab_type)
+            if img is not None:
+                self._save_cache(char, font_style, tab_name, img)
+                logger.info("Fetched '%s' in %s/%s", char, font_style, tab_name)
+                return img, tab_name
+
+        return None, ""
 
     # ── web fetch ────────────────────────────────────────────
 
-    def _fetch_from_web(self, char: str, font_style: str) -> Optional[Image.Image]:
-        """Query ygsf API, download first suitable clear_image. Returns PIL Image or None."""
+    def _fetch_from_web(
+        self, char: str, font_style: str, tab_type: int
+    ) -> Optional[Image.Image]:
+        """Query ygsf API for one (char, font, tab). Returns PIL Image or None."""
         params = {
             "key": char,
             "kind": 1,
-            "type": 2,
+            "type": tab_type,
             "font": font_style,
             "author": "",
             "orderby": "hot",
@@ -399,11 +435,13 @@ class CalligraphyScraper:
     # ── cache ────────────────────────────────────────────────
 
     @staticmethod
-    def _cache_path(char: str, font_style: str) -> Path:
-        return CACHE_DIR / f"{char}_{font_style}.png"
+    def _cache_path(char: str, font_style: str, tab_name: str) -> Path:
+        return CACHE_DIR / f"{char}_{font_style}_{tab_name}.png"
 
-    def _load_cache(self, char: str, font_style: str) -> Optional[Image.Image]:
-        path = self._cache_path(char, font_style)
+    def _load_cache(
+        self, char: str, font_style: str, tab_name: str
+    ) -> Optional[Image.Image]:
+        path = self._cache_path(char, font_style, tab_name)
         if path.exists():
             try:
                 img = Image.open(path)
@@ -414,8 +452,10 @@ class CalligraphyScraper:
         return None
 
     @staticmethod
-    def _save_cache(char: str, font_style: str, img: Image.Image) -> None:
-        path = CalligraphyScraper._cache_path(char, font_style)
+    def _save_cache(
+        char: str, font_style: str, tab_name: str, img: Image.Image
+    ) -> None:
+        path = CalligraphyScraper._cache_path(char, font_style, tab_name)
         try:
             img.save(path, "PNG")
         except (OSError, IOError) as exc:
