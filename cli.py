@@ -1,0 +1,183 @@
+"""
+印章生成器 — CLI 批量入口
+
+Usage:
+    # Single seal
+    python cli.py --text "禅" --shape oval --style baiwen --type leisure
+
+    # Batch (one word per line in file)
+    python cli.py --batch chars.txt --shape oval --style baiwen --type leisure --output-dir ./seals/
+
+chars.txt format:
+    禅
+    苏轼
+    极客禅
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+from core import SealGenerator
+
+console = Console()
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="极客禅 · 印章生成器 CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Input mode (mutually exclusive)
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--text", type=str, help="印章文字（1–4字）")
+    group.add_argument("--batch", type=str, help="批量文件路径（每行一个词）")
+
+    # Seal parameters
+    p.add_argument(
+        "--shape",
+        choices=["oval", "square"],
+        default="oval",
+        help="形制: oval=竖椭圆, square=方章 (default: oval)",
+    )
+    p.add_argument(
+        "--style",
+        choices=["baiwen", "zhuwen"],
+        default="baiwen",
+        help="风格: baiwen=白文, zhuwen=朱文 (default: baiwen)",
+    )
+    p.add_argument(
+        "--type",
+        choices=["leisure", "name"],
+        default="leisure",
+        dest="seal_type",
+        help="章类: leisure=闲章, name=名章 (default: leisure)",
+    )
+    p.add_argument(
+        "--color", type=str, default="#B22222", help="朱砂颜色 hex (default: #B22222)"
+    )
+    p.add_argument(
+        "--grain", type=float, default=0.25, help="质感强度 0.0–1.0 (default: 0.25)"
+    )
+    p.add_argument(
+        "--rotation", type=float, default=2.0, help="旋转角度° (default: 2.0)"
+    )
+    p.add_argument("--size", type=int, default=600, help="短边像素 (default: 600)")
+
+    # Output
+    p.add_argument(
+        "--output-dir",
+        type=str,
+        default="./seals",
+        help="输出目录 (default: ./seals)",
+    )
+
+    return p.parse_args()
+
+
+def _generate_one(
+    gen: SealGenerator,
+    text: str,
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> bool:
+    """Generate and save one seal. Returns True on success."""
+    try:
+        result = gen.generate(
+            text=text,
+            shape=args.shape,
+            style=args.style,
+            seal_type=args.seal_type,
+            color=args.color,
+            grain=args.grain,
+            rotation=args.rotation,
+            size=args.size,
+        )
+
+        # Save transparent PNG
+        filename = f"{text}_{args.style}_{args.shape}.png"
+        out_path = output_dir / filename
+        result["image_transparent"].save(out_path, "PNG")
+
+        font_info = result["font_used"]
+        if result["font_fallback"]:
+            console.print(f"  [yellow]⚠ 降级[/yellow] → {font_info}")
+        else:
+            console.print(f"  [green]✓[/green] 字体: {font_info}")
+
+        for w in result["warnings"]:
+            console.print(f"  [yellow]⚠ {w}[/yellow]")
+
+        console.print(f"  [dim]→ {out_path}[/dim]")
+        return True
+
+    except Exception as exc:
+        console.print(f"  [red]✗ 生成失败: {exc}[/red]")
+        logging.exception("Generation failed for '%s'", text)
+        return False
+
+
+def main() -> None:
+    args = _parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[RichHandler(console=console, show_time=False, show_path=False)],
+    )
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    gen = SealGenerator()
+
+    if args.text:
+        texts = [args.text]
+    else:
+        batch_path = Path(args.batch)
+        if not batch_path.exists():
+            console.print(f"[red]文件不存在: {batch_path}[/red]")
+            sys.exit(1)
+        texts = [
+            line.strip()
+            for line in batch_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    if not texts:
+        console.print("[red]无有效输入文字[/red]")
+        sys.exit(1)
+
+    console.print(f"\n[bold]极客禅 · 印章生成器[/bold]")
+    console.print(f"共 {len(texts)} 枚印章待生成\n")
+
+    success = 0
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("生成中...", total=len(texts))
+
+        for text in texts:
+            progress.update(task, description=f"[cyan]{text}[/cyan]")
+            if _generate_one(gen, text, args, output_dir):
+                success += 1
+            progress.advance(task)
+
+    console.print(f"\n[bold green]完成:[/bold green] {success}/{len(texts)} 枚成功")
+    console.print(f"[dim]输出目录: {output_dir.resolve()}[/dim]\n")
+
+
+if __name__ == "__main__":
+    main()

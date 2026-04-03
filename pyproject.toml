@@ -1,0 +1,20 @@
+[project]
+name = "fangcun"
+version = "0.1.0"
+description = "极客禅 · 中国传统电子印章生成器"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "fake-useragent>=1.4",
+    "gradio>=6.11.0",
+    "numpy>=2.4.4",
+    "opencv-python>=4.13.0.92",
+    "pillow>=12.2.0",
+    "pycryptodome>=3.23.0",
+    "requests>=2.33.1",
+    "rich>=13.0",
+]
+
+[project.scripts]
+seal-cli = "cli:main"

@@ -1,0 +1,149 @@
+"""
+Unified seal generation pipeline.
+
+Both app.py (Gradio) and cli.py share this single entry point.
+The core package never depends on any UI framework.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from PIL import Image
+
+from .extractor import CharExtractor
+from .layout import SealLayout
+from .renderer import SealRenderer
+from .scraper import CalligraphyScraper
+from .texture import StoneTexture
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SealResult:
+    """Immutable result from seal generation."""
+
+    image_transparent: Image.Image
+    image_preview: Image.Image
+    font_used: str
+    font_fallback: bool
+    warnings: tuple[str, ...]
+
+
+class SealGenerator:
+    """
+    Orchestrate the full pipeline:
+      scraper → extractor → layout → renderer → texture → rotation
+    """
+
+    def __init__(self) -> None:
+        self._scraper = CalligraphyScraper()
+        self._extractor = CharExtractor()
+        self._layout = SealLayout()
+        self._renderer = SealRenderer()
+        self._texture = StoneTexture()
+
+    def generate(
+        self,
+        text: str,
+        shape: str = "oval",
+        style: str = "baiwen",
+        seal_type: str = "leisure",
+        color: str = "#B22222",
+        grain: float = 0.25,
+        rotation: float = 2.0,
+        size: int = 600,
+    ) -> dict:
+        """
+        Generate a complete seal image.
+
+        Args:
+            text:      seal characters (1–4 recommended)
+            shape:     'oval' | 'square'
+            style:     'baiwen' | 'zhuwen'
+            seal_type: 'leisure' | 'name'
+            color:     hex color string, e.g. '#B22222'
+            grain:     texture strength 0.0–1.0
+            rotation:  rotation angle in degrees
+            size:      short-side pixels
+
+        Returns:
+            dict with keys: image_transparent, image_preview,
+                           font_used, font_fallback, warnings
+        """
+        warnings: list[str] = []
+        color_rgb = _hex_to_rgb(color)
+
+        if not text:
+            raise ValueError("印章文字不能为空")
+
+        if len(text) > 4:
+            warnings.append(f"超过4字 ({len(text)}字), 将自动缩小适配")
+
+        # ── 1. Fetch character images ────────────────────────
+        fonts_used: list[str] = []
+        raw_images: list[Image.Image] = []
+        any_fallback = False
+
+        for char in text:
+            img, font_name, was_fallback = self._scraper.fetch_char_image(
+                char, seal_type
+            )
+            raw_images.append(img)
+            fonts_used.append(font_name)
+            if was_fallback:
+                any_fallback = True
+
+        # Summarize font info
+        unique_fonts = list(dict.fromkeys(fonts_used))  # preserves order
+        font_display = "、".join(unique_fonts)
+        if any_fallback:
+            warnings.append(f"部分字体已降级: {font_display}")
+
+        # ── 2. Extract character masks ───────────────────────
+        masks = [self._extractor.extract(img) for img in raw_images]
+
+        # ── 3. Layout ────────────────────────────────────────
+        ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(shape, size)
+        placements = self._layout.arrange(masks, shape, (ta_w, ta_h))
+
+        # Offset placements from text-area-local to canvas-absolute
+        for p in placements:
+            p["x"] += ta_x
+            p["y"] += ta_y
+
+        # ── 4. Render ────────────────────────────────────────
+        seal = self._renderer.render(placements, shape, style, color_rgb, size)
+
+        # ── 5. Texture ───────────────────────────────────────
+        seal = self._texture.apply(seal, grain)
+
+        # ── 6. Rotation ──────────────────────────────────────
+        if rotation != 0.0:
+            seal = seal.rotate(
+                rotation,
+                resample=Image.Resampling.BICUBIC,
+                expand=True,
+            )
+
+        # ── 7. White-background preview ──────────────────────
+        preview = Image.new("RGBA", seal.size, (255, 255, 255, 255))
+        preview = Image.alpha_composite(preview, seal)
+
+        return {
+            "image_transparent": seal,
+            "image_preview": preview,
+            "font_used": font_display,
+            "font_fallback": any_fallback,
+            "warnings": warnings,
+        }
+
+
+def _hex_to_rgb(hex_str: str) -> tuple[int, int, int]:
+    """Convert '#B22222' → (178, 34, 34)."""
+    h = hex_str.lstrip("#")
+    if len(h) != 6:
+        raise ValueError(f"Invalid hex color: {hex_str}")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
