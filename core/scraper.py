@@ -44,7 +44,7 @@ from typing import Optional
 
 import numpy as np
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 try:
     from Crypto.Cipher import AES
@@ -372,14 +372,31 @@ class CalligraphyScraper:
 
         return None
 
+    # ── image selection (top-N scoring) ────────────────────
+
+    _MAX_CANDIDATES = 5
+    _MIN_RESOLUTION = 150
+
     def _download_best_image(self, glyph_list: list[dict]) -> Optional[Image.Image]:
-        """Try to download the first clear_image with resolution >= 100px."""
+        """
+        Download up to top-5 candidate images, score each, return the best.
+
+        Scoring (total 100):
+          Resolution  (0–40): min(short_side / 150, 1) × 40
+          Contrast    (0–40): min(grayscale_std / 80, 1) × 40
+          Coverage    (0–20): stroke area ratio in 15%–60% sweet spot
+        """
+        candidates: list[tuple[Image.Image, float, str]] = []
+
         for glyph in glyph_list:
+            if len(candidates) >= self._MAX_CANDIDATES:
+                break
+
             img_url = glyph.get("_clear_image", "")
             if not img_url:
                 continue
 
-            # Remove CDN processing for full resolution
+            # Full resolution
             if "x-bce-process=" in img_url:
                 img_url = img_url.split("?")[0]
 
@@ -392,17 +409,109 @@ class CalligraphyScraper:
                 img_resp.raise_for_status()
 
                 img = Image.open(BytesIO(img_resp.content))
-                if img.width < 100 or img.height < 100:
-                    logger.debug("Image too small (%dx%d), skipping", img.width, img.height)
+
+                # Hard filter: minimum resolution
+                if min(img.width, img.height) < self._MIN_RESOLUTION:
+                    logger.debug(
+                        "Below min resolution (%dx%d), skipping",
+                        img.width,
+                        img.height,
+                    )
                     continue
 
-                return img
+                # Auto-invert dark-background images (common in 印谱 sources)
+                img = self._auto_invert_if_dark(img)
+
+                score = self._score_image(img)
+                src = glyph.get("_from", "?")
+                candidates.append((img, score, src))
+                logger.debug(
+                    "Candidate: %dx%d score=%.1f from=%s",
+                    img.width,
+                    img.height,
+                    score,
+                    src,
+                )
 
             except (requests.RequestException, OSError) as exc:
                 logger.debug("Image download failed: %s", exc)
                 continue
 
-        return None
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda c: c[1], reverse=True)
+        best_img, best_score, best_src = candidates[0]
+        logger.info(
+            "Selected image score=%.1f from=%s (%d candidates)",
+            best_score,
+            best_src,
+            len(candidates),
+        )
+        return best_img
+
+    @staticmethod
+    def _score_image(img: Image.Image) -> float:
+        """
+        Score a candidate image (0–100).
+
+          Resolution  (0–30): short-side relative to 600px (gate)
+          Contrast    (0–50): grayscale std relative to 120 (main discriminator)
+          Coverage    (0–20): binary stroke ratio in 15%–60% sweet spot
+
+        Higher contrast denominator (120 vs 80) spreads scores among
+        already-clean images — std=93 → 38.8 vs std=119 → 49.6.
+        """
+        gray = np.array(img.convert("L"), dtype=np.float64)
+        short_side = min(img.width, img.height)
+
+        # Resolution: 0–30 (gate — most images pass easily)
+        res_score = min(short_side / 600.0, 1.0) * 30.0
+
+        # Contrast: 0–50 (main quality signal for calligraphy)
+        std = float(np.std(gray))
+        contrast_score = min(std / 120.0, 1.0) * 50.0
+
+        # Coverage: 0–20 (binary threshold at 128)
+        binary = gray < 128
+        coverage = float(binary.mean())
+
+        if 0.15 <= coverage <= 0.60:
+            coverage_score = 20.0
+        elif coverage < 0.15:
+            coverage_score = (coverage / 0.15) * 20.0
+        else:  # > 0.60
+            coverage_score = max(0.0, (1.0 - coverage) / 0.40) * 20.0
+
+        return res_score + contrast_score + coverage_score
+
+    @staticmethod
+    def _auto_invert_if_dark(img: Image.Image) -> Image.Image:
+        """
+        Detect dark-background images (印谱/seal impression scans)
+        and auto-invert to white-background for consistent downstream processing.
+
+        Detection: center-region average brightness < 80.
+        """
+        gray = np.array(img.convert("L"))
+        h, w = gray.shape
+        margin = min(h, w) // 4
+        cy, cx = h // 2, w // 2
+        center = gray[cy - margin : cy + margin, cx - margin : cx + margin]
+
+        if center.size > 0 and float(center.mean()) < 80:
+            logger.info(
+                "Dark background detected (center brightness=%.0f), inverting",
+                center.mean(),
+            )
+            if img.mode == "RGBA":
+                r, g, b, a = img.split()
+                rgb = Image.merge("RGB", (r, g, b))
+                rgb = ImageOps.invert(rgb)
+                return Image.merge("RGBA", (*rgb.split(), a))
+            return ImageOps.invert(img.convert("RGB")).convert(img.mode)
+
+        return img
 
     # ── local fallback ───────────────────────────────────────
 
