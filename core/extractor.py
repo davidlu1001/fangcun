@@ -43,15 +43,19 @@ class CharExtractor:
             # Enhanced preprocessing for noisy originals:
             # bilateral filter preserves edges while smoothing paper texture
             gray = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
-            binary = self._binarize(gray, block_size=21, c=10)
-        elif source == "本地":
-            # Local font rendering: clean digital, Otsu is optimal
-            binary = self._binarize_otsu(gray)
+            # Adaptive threshold with block_size proportional to image size —
+            # must be large enough to cover full stroke width (50-100+ px).
+            short_side = min(gray.shape)
+            block = max(short_side // 4, 31) | 1  # ensure odd, ≥31
+            binary = self._binarize(gray, block_size=block, c=10)
         else:
-            # 字典: clean dictionary scans, standard adaptive threshold
-            binary = self._binarize(gray, block_size=15, c=8)
+            # 字典 and 本地: clean uniform backgrounds → global Otsu is optimal.
+            # Adaptive threshold CANNOT be used here: block_size=15 is tiny vs
+            # stroke width (50-100+ px), causing only edges to be detected
+            # (hollow outlines instead of solid fills).
+            binary = self._binarize_otsu(gray)
 
-        # Quality check — retry with Otsu fallback if coverage out of range
+        # Quality check — retry with Otsu if adaptive produced bad result
         coverage = np.count_nonzero(binary) / binary.size
         if coverage < _MIN_COVERAGE or coverage > _MAX_COVERAGE:
             logger.info(
