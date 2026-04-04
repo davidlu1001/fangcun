@@ -95,10 +95,7 @@ def generate_seal(
 
 # ── Gradio UI ────────────────────────────────────────────────
 
-with gr.Blocks(
-    title="极客禅 · 印章生成器",
-    theme=gr.themes.Soft(),
-) as demo:
+with gr.Blocks(title="极客禅 · 印章生成器") as demo:
 
     gr.Markdown("# 🖋 极客禅 · 印章生成器")
 
@@ -211,4 +208,4 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(theme=gr.themes.Soft())

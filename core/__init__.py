@@ -91,16 +91,17 @@ class SealGenerator:
         # Tab priority per font style: 字典 → 真迹 (不用字库).
         # Tab source affects extractor preprocessing intensity.
         #
-        raw_images, font_used, any_fallback, tab_sources, fetch_warnings = (
+        raw_images, font_used, any_fallback, tab_sources, source_names, fetch_warnings = (
             self._scraper.fetch_chars_consistent(text, seal_type)
         )
         warnings.extend(fetch_warnings)
         font_display = font_used
 
         # ── 2. Extract character masks (source-aware) ────────
+        # source_name passed for Tier 1 印谱 whitelist detection
         masks = [
-            self._extractor.extract(img, source=src)
-            for img, src in zip(raw_images, tab_sources)
+            self._extractor.extract(img, source=tab, source_name=src_name)
+            for img, tab, src_name in zip(raw_images, tab_sources, source_names)
         ]
 
         # ── 3. Layout ────────────────────────────────────────
