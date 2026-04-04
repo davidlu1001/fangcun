@@ -402,6 +402,14 @@ class CalligraphyScraper:
         majority_src = max(source_cov, key=_rank)
         covered = {c: (img, tab) for c, _, img, tab in source_cov[majority_src]}
 
+        # If majority source covers at most half the chars, don't force unification
+        if len(covered) <= len(text) // 2:
+            logger.warning(
+                "多数来源 %s 覆盖率不足 50%% (%d/%d), 退化各字独立最优",
+                majority_src, len(covered), len(text),
+            )
+            return None
+
         logger.info(
             "多数来源: %s 覆盖 %d/%d 字",
             majority_src, len(covered), len(text),
@@ -657,7 +665,10 @@ class CalligraphyScraper:
         res_score = min(short_side / 600.0, 1.0) * 30.0
         contrast_score = min(float(np.std(gray)) / 120.0, 1.0) * 50.0
 
-        # ── Physical fragmentation hard reject ───────────────
+        # ── Physical fragmentation hard reject (印谱 only) ────
+        # Only applies to 印谱 images (opaque area has bright stroke slots).
+        # Dictionary images have opaque=strokes (all dark) — skip entirely.
+        # Prevents false kills on 道(7 components), 轼(4 components) etc.
         if img.mode in ("RGBA", "LA"):
             alpha_arr = np.array(img.split()[-1])
             fully_transparent = float((alpha_arr < 10).sum()) / alpha_arr.size
@@ -671,21 +682,32 @@ class CalligraphyScraper:
                     cc_max = int(cc_stats[1:, cv2.CC_STAT_AREA].max())
                     total_area = img.width * img.height
 
-                    # Gate: only if largest block > 15% of image
-                    # (印谱 stone = 40-70%, normal strokes = 2-8%)
                     if cc_max > total_area * 0.15:
-                        major_blocks = sum(
-                            1
-                            for j in range(1, n_labels)
-                            if cc_stats[j, cv2.CC_STAT_AREA] > cc_max * 0.15
-                        )
-                        if major_blocks >= 2:
-                            logger.warning(
-                                "物理碎裂 %d 大块, 淘汰: src=%s",
-                                major_blocks,
-                                source_name,
+                        # Check if this is actually 印谱 (bright slots in opaque)
+                        # vs normal strokes (opaque area all dark)
+                        bg = Image.new("RGB", img.size, (255, 255, 255))
+                        bg.paste(img, mask=img.split()[-1])
+                        comp_gray = np.array(bg.convert("L"))
+                        opaque_gray = comp_gray[opaque.astype(bool)]
+                        light_ratio = float(
+                            (opaque_gray > 200).sum()
+                        ) / max(len(opaque_gray), 1)
+
+                        # Only 印谱: light_ratio > 0.15 (white slots in stone)
+                        if light_ratio > 0.15:
+                            major_blocks = sum(
+                                1
+                                for j in range(1, n_labels)
+                                if cc_stats[j, cv2.CC_STAT_AREA] > cc_max * 0.15
                             )
-                            return 0.0
+                            if major_blocks >= 2:
+                                logger.warning(
+                                    "印谱碎裂 %d 大块 (light=%.2f), 淘汰: src=%s",
+                                    major_blocks,
+                                    light_ratio,
+                                    source_name,
+                                )
+                                return 0.0
 
         # ── Coverage ─────────────────────────────────────────
         binary = gray < 128
@@ -701,11 +723,22 @@ class CalligraphyScraper:
 
         base = res_score + contrast_score + coverage_score
 
-        # ── Known 印谱 source base penalty ───────────────────
+        # ── Source penalties ──────────────────────────────────
         from .extractor import KNOWN_YINPU_SOURCES
 
         if source_name in KNOWN_YINPU_SOURCES:
             base = max(0.0, base - 10.0)
+
+        # 金文/简帛 sources: archaic glyph forms unsuitable for seal carving
+        _INFERIOR_STYLE_SOURCES = {
+            "常用金文书法字典",
+            "汉语古文字字形表",
+            "睡虎地秦简文字编",
+            "马王堆简帛",
+            "马王堆帛书书法大字典",
+        }
+        if source_name in _INFERIOR_STYLE_SOURCES:
+            base = max(0.0, base - 25.0)
 
         return base
 
