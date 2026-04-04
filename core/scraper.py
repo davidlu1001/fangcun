@@ -228,6 +228,21 @@ class CalligraphyScraper:
                     warnings.append(
                         f"首选{priority[0]}中部分字缺失，全部统一使用{font_style}"
                     )
+
+                # ── Try unified source (同源同体) ────────────
+                unified = self._try_unified_source(text, font_style)
+                if unified is not None:
+                    u_images, u_tabs, u_srcs, u_source = unified
+                    logger.info("统一来源: %s (%d字)", u_source, len(text))
+                    warnings.append(f"统一来源: {u_source}")
+                    return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
+
+                # No unified source — use per-char best (existing behavior)
+                unique_sources = list(dict.fromkeys(src_names))
+                if len(unique_sources) > 1:
+                    warnings.append(
+                        f"无统一来源，各字分别取最优: {', '.join(unique_sources)}"
+                    )
                 return images, font_style, idx > 0, tabs, src_names, warnings
 
         # ── Pass 2: no single style covers all — find best coverage ──
@@ -287,6 +302,62 @@ class CalligraphyScraper:
         )
         return images, best_style, True, tabs, src_names, warnings
 
+    # ── unified source selection ────────────────────────────
+
+    def _try_unified_source(
+        self, text: str, font_style: str
+    ) -> Optional[tuple[list[Image.Image], list[str], list[str], str]]:
+        """
+        Try to find a single source that covers ALL characters.
+
+        Returns (images, tabs, source_names, unified_source_name) or None.
+        """
+        # Collect all candidates per character
+        char_candidates: dict[str, dict[str, tuple[Image.Image, float, str]]] = {}
+        for char in text:
+            candidates = self._fetch_all_candidates(char, font_style)
+            if not candidates:
+                return None
+            # Group by source: {source_name: (img, score, tab)}
+            by_source: dict[str, tuple[Image.Image, float, str]] = {}
+            for img, score, src, tab in candidates:
+                if src not in by_source:
+                    by_source[src] = (img, score, tab)
+            char_candidates[char] = by_source
+
+        # Find sources common to ALL characters
+        source_sets = [set(cs.keys()) for cs in char_candidates.values()]
+        common = source_sets[0]
+        for s in source_sets[1:]:
+            common &= s
+
+        if not common:
+            logger.info("无统一来源 (字: %s)", ", ".join(text))
+            return None
+
+        # Pick common source with highest average score
+        best_source = ""
+        best_avg = -1.0
+        for src in common:
+            avg = sum(char_candidates[c][src][1] for c in text) / len(text)
+            if avg > best_avg:
+                best_avg = avg
+                best_source = src
+
+        # Assemble result from the unified source
+        images: list[Image.Image] = []
+        tabs: list[str] = []
+        src_names: list[str] = []
+        for char in text:
+            img, score, tab = char_candidates[char][best_source]
+            images.append(img)
+            tabs.append(tab)
+            src_names.append(best_source)
+            # Cache the unified-source image
+            self._save_cache(char, font_style, tab, img, best_source)
+
+        return images, tabs, src_names, best_source
+
     # ── cache-then-web helper ───────────────────────────────
 
     def _get_or_fetch(
@@ -335,10 +406,10 @@ class CalligraphyScraper:
 
     # ── web fetch ────────────────────────────────────────────
 
-    def _fetch_from_web(
+    def _query_glyph_list(
         self, char: str, font_style: str, tab_type: int
-    ) -> Optional[Image.Image]:
-        """Query ygsf API for one (char, font, tab). Returns PIL Image or None."""
+    ) -> list[dict]:
+        """Query ygsf API, return raw glyph list (no image download)."""
         params = {
             "key": char,
             "kind": 1,
@@ -375,14 +446,9 @@ class CalligraphyScraper:
                 data = _decrypt_response(resp.text)
 
                 if data.get("stat") != 0:
-                    logger.warning("API error for '%s' %s: %s", char, font_style, data)
-                    return None, ""
+                    return []
 
-                glyph_list = data.get("data", {}).get("list", [])
-                if not glyph_list:
-                    return None, ""
-
-                return self._download_best_image(glyph_list)
+                return data.get("data", {}).get("list", [])
 
             except requests.RequestException as exc:
                 wait = (2**attempt) + random.uniform(0, 1)
@@ -394,20 +460,57 @@ class CalligraphyScraper:
                 )
                 time.sleep(wait)
 
-        return None, ""
+        return []
+
+    def _fetch_from_web(
+        self, char: str, font_style: str, tab_type: int
+    ) -> tuple[Optional[Image.Image], str]:
+        """Query API + download best image. Returns (img, source_name) or (None, '')."""
+        glyph_list = self._query_glyph_list(char, font_style, tab_type)
+        if not glyph_list:
+            return None, ""
+        return self._download_best_image(glyph_list)
+
+    def _fetch_all_candidates(
+        self, char: str, font_style: str
+    ) -> list[tuple[Image.Image, float, str, str]]:
+        """
+        Fetch ALL scored candidates for a char across tabs.
+        Returns [(img, score, source_name, tab), ...] sorted by score desc.
+        Used for unified source selection.
+        """
+        all_candidates: list[tuple[Image.Image, float, str, str]] = []
+
+        # Try traditional form too
+        chars_to_try = [char]
+        trad = _to_traditional(char)
+        if trad is not None:
+            chars_to_try.append(trad)
+
+        for try_char in chars_to_try:
+            for tab_name, tab_type in TAB_PRIORITY:
+                glyph_list = self._query_glyph_list(try_char, font_style, tab_type)
+                if not glyph_list:
+                    continue
+                scored = self._download_scored_candidates(glyph_list)
+                for img, score, src in scored:
+                    all_candidates.append((img, score, src, tab_name))
+
+            if all_candidates:
+                break  # Found in original char, don't try traditional
+
+        all_candidates.sort(key=lambda c: c[1], reverse=True)
+        return all_candidates
 
     # ── image selection (top-N scoring) ────────────────────
 
     _MAX_CANDIDATES = 5
     _MIN_RESOLUTION = 150
 
-    def _download_best_image(
+    def _download_scored_candidates(
         self, glyph_list: list[dict]
-    ) -> tuple[Optional[Image.Image], str]:
-        """
-        Download up to top-5 candidate images, score each, return the best.
-        Returns (image, source_name) or (None, '').
-        """
+    ) -> list[tuple[Image.Image, float, str]]:
+        """Download up to 5 candidates, score each. Returns [(img, score, source_name), ...]."""
         candidates: list[tuple[Image.Image, float, str]] = []
 
         for glyph in glyph_list:
@@ -418,7 +521,6 @@ class CalligraphyScraper:
             if not img_url:
                 continue
 
-            # Full resolution
             if "x-bce-process=" in img_url:
                 img_url = img_url.split("?")[0]
 
@@ -432,41 +534,35 @@ class CalligraphyScraper:
 
                 img = Image.open(BytesIO(img_resp.content))
 
-                # Hard filter: minimum resolution
                 if min(img.width, img.height) < self._MIN_RESOLUTION:
-                    logger.debug(
-                        "Below min resolution (%dx%d), skipping",
-                        img.width,
-                        img.height,
-                    )
                     continue
 
-                # Score raw image — normalization is done in extractor
                 src = glyph.get("_from", "?")
                 score = self._score_image(img, src)
                 candidates.append((img, score, src))
                 logger.debug(
                     "Candidate: %dx%d score=%.1f from=%s",
-                    img.width,
-                    img.height,
-                    score,
-                    src,
+                    img.width, img.height, score, src,
                 )
 
             except (requests.RequestException, OSError) as exc:
                 logger.debug("Image download failed: %s", exc)
                 continue
 
+        candidates.sort(key=lambda c: c[1], reverse=True)
+        return candidates
+
+    def _download_best_image(
+        self, glyph_list: list[dict]
+    ) -> tuple[Optional[Image.Image], str]:
+        """Download top-5, return best. Returns (image, source_name) or (None, '')."""
+        candidates = self._download_scored_candidates(glyph_list)
         if not candidates:
             return None, ""
-
-        candidates.sort(key=lambda c: c[1], reverse=True)
         best_img, best_score, best_src = candidates[0]
         logger.info(
             "Selected image score=%.1f from=%s (%d candidates)",
-            best_score,
-            best_src,
-            len(candidates),
+            best_score, best_src, len(candidates),
         )
         return best_img, best_src
 
