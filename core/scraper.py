@@ -72,7 +72,14 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path.home() / ".seal_gen" / "cache"
+# HF Spaces: home dir may not be writable; use /tmp fallback
+_cache_base = os.environ.get("SEAL_CACHE_DIR", "")
+if _cache_base:
+    CACHE_DIR = Path(_cache_base)
+elif os.access(str(Path.home()), os.W_OK):
+    CACHE_DIR = Path.home() / ".seal_gen" / "cache"
+else:
+    CACHE_DIR = Path("/tmp") / ".seal_gen" / "cache"
 API_BASE = "https://api.ygsf.com/v2.4"
 AES_KEY = b"PkT!ihpN^QkQ62k%"
 

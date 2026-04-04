@@ -1,4 +1,18 @@
+---
+title: 极客禅 · 印章生成器
+emoji: 🖋
+colorFrom: red
+colorTo: yellow
+sdk: gradio
+sdk_version: "4.0"
+app_file: app.py
+pinned: false
+license: mit
+---
+
 # 极客禅 · 印章生成器
+
+Traditional Chinese seal generator. 数字化传统金石艺术，代码刻出的方寸之美。
 
 中国传统电子印章生成工具。从书法字库自动抓取字形，渲染出具有金石质感的朱文/白文印章。
 

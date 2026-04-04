@@ -208,4 +208,4 @@ with gr.Blocks(title="极客禅 · 印章生成器") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(theme=gr.themes.Soft())
+    demo.launch(server_name="0.0.0.0", theme=gr.themes.Soft())
