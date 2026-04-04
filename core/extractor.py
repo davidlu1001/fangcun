@@ -225,64 +225,73 @@ class CharExtractor:
     def _remove_seal_frame(binary: np.ndarray) -> np.ndarray:
         """
         Remove rectangular seal frame lines from 印谱 binary mask.
-        Handles both complete hollow frames and broken frame segments.
 
-        Three-layer detection:
-          1. Hollow box: bbox_coverage > 30% AND fill_ratio < 35%
-          2. Frame line segment: aspect > 6 AND spans > 55% of image dimension
-             AND centroid > 30% from center AND area < 2.5% of image
-          3. Small noise (< 0.1%): skipped silently
+        Uses 1D pixel projection instead of connected-component analysis.
+        CCA fails when frame pixels and stroke pixels are physically connected
+        (粘连), merging into one large component where fill_ratio/aspect are
+        useless. Projection-based detection is immune to connectivity.
 
-        Protection for 「一」: a horizontal stroke has its centroid near image
-        center (center_dist ≈ 0%), well within the 30% exclusion zone.
+        Algorithm:
+          1. Project rows/cols: count white pixels per row and per column
+          2. Frame lines span full width/height → pixel count > 50% threshold
+             (no calligraphy stroke can reach 50% of a full row in a seal)
+          3. Only scan outer 15% (top/bottom for rows, left/right for cols)
+             — center zone is absolutely protected
+          4. Convolve FIRST to dilate thick/double frames, THEN hard-truncate
+             center zone (prevents dilation from leaking inward)
+
+        Protection for 「一」: its pixels are in the center zone (>15% from
+        edges), so the scan region never includes them.
         """
         h, w = binary.shape
-        img_area = h * w
-        cx_img, cy_img = w / 2.0, h / 2.0
-
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-            binary, connectivity=8
-        )
         result = binary.copy()
 
-        for i in range(1, num_labels):
-            bx, by, bw, bh, area = stats[i]
-            bbox_area = max(bw * bh, 1)
-            fill_ratio = area / bbox_area
-            bbox_cov = bbox_area / img_area
-            aspect = max(bw, bh) / max(min(bw, bh), 1)
+        threshold_w = w * 0.50
+        threshold_h = h * 0.50
 
-            # Skip tiny noise
-            if area < img_area * 0.001:
-                continue
+        scan_y = max(5, int(h * 0.15))
+        scan_x = max(5, int(w * 0.15))
 
-            # Detection 1: complete hollow frame
-            is_hollow_box = bbox_cov > 0.30 and fill_ratio < 0.35
+        erase_r = max(3, int(min(w, h) * 0.015))
+        kernel = np.ones(2 * erase_r + 1, dtype=int)
 
-            # Detection 2: broken frame line segment
-            spans_major = bw > w * 0.55 or bh > h * 0.55
-            is_long_thin = aspect > 6 and spans_major
+        # ── Y-axis projection: top/bottom frame lines ────────
+        row_sums = (binary > 0).sum(axis=1).astype(float)
 
-            is_frame_line = False
-            if is_long_thin:
-                centroid_x = bx + bw / 2.0
-                centroid_y = by + bh / 2.0
-                if bw >= bh:
-                    center_dist = abs(centroid_y - cy_img) / h
-                else:
-                    center_dist = abs(centroid_x - cx_img) / w
+        frame_rows = np.zeros(h, dtype=bool)
+        frame_rows[:scan_y] = row_sums[:scan_y] > threshold_w
+        frame_rows[h - scan_y :] = row_sums[h - scan_y :] > threshold_w
 
-                is_peripheral = center_dist > 0.30
-                is_thin_enough = area < img_area * 0.025
-                is_frame_line = is_peripheral and is_thin_enough
+        if frame_rows.any():
+            # Convolve FIRST (dilate each hit independently)
+            dilated_rows = np.convolve(frame_rows.astype(int), kernel, mode="same") > 0
+            # THEN hard-truncate center — prevents edge dilation from leaking in
+            dilated_rows[scan_y : h - scan_y] = False
+            result[dilated_rows, :] = 0
+            logger.info(
+                "移除上下印框: %d rows erased (scan_y=%d, erase_r=%d)",
+                int(dilated_rows.sum()),
+                scan_y,
+                erase_r,
+            )
 
-            if is_hollow_box or is_frame_line:
-                logger.info(
-                    "移除印框 #%d: %dx%d fill=%.2f asp=%.1f cov=%.3f → %s",
-                    i, bw, bh, fill_ratio, aspect, bbox_cov,
-                    "hollow_box" if is_hollow_box else "frame_line",
-                )
-                result[labels == i] = 0
+        # ── X-axis projection: left/right frame lines ────────
+        col_sums = (binary > 0).sum(axis=0).astype(float)
+
+        frame_cols = np.zeros(w, dtype=bool)
+        frame_cols[:scan_x] = col_sums[:scan_x] > threshold_h
+        frame_cols[w - scan_x :] = col_sums[w - scan_x :] > threshold_h
+
+        if frame_cols.any():
+            dilated_cols = np.convolve(frame_cols.astype(int), kernel, mode="same") > 0
+            dilated_cols[scan_x : w - scan_x] = False
+            result[:, dilated_cols] = 0
+            logger.info(
+                "移除左右印框: %d cols erased (scan_x=%d, erase_r=%d)",
+                int(dilated_cols.sum()),
+                scan_x,
+                erase_r,
+            )
 
         return result
 
