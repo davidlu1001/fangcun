@@ -35,6 +35,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import random
 import subprocess
 import time
@@ -196,18 +197,20 @@ class CalligraphyScraper:
         self, text: str, seal_type: str
     ) -> tuple[list[Image.Image], str, bool, list[str], list[str], list[str]]:
         """
-        Fetch images for ALL characters, enforcing same-style consistency.
+        Deferred state machine for font+source selection.
 
-        金石学原则：同一方印章内所有字必须同一书体。
+        Key principle: prefer lower-priority font with unified source over
+        higher-priority font with mixed sources (隶书同源 > 篆书异源).
 
         Returns:
             (images, font_used, was_fallback, tab_sources, source_names, warnings)
         """
         priority = self.FONT_PRIORITY.get(seal_type, ["篆", "隶", "楷"])
         warnings: list[str] = []
+        best_fallback = None  # "chars found but no unified source" backup
 
-        # ── Pass 1: find a style that covers ALL characters ──
         for idx, font_style in enumerate(priority):
+            # Step 1: verify font covers all chars (fast, uses cache)
             images: list[Image.Image] = []
             tabs: list[str] = []
             src_names: list[str] = []
@@ -223,80 +226,83 @@ class CalligraphyScraper:
                 tabs.append(tab)
                 src_names.append(src_name)
 
-            if all_found:
+            if not all_found:
+                continue  # font can't cover all chars, try next
+
+            # Step 2: try unified source (n=5, then n=10)
+            all_cands = {
+                char: self._fetch_all_candidates(char, font_style)
+                for char in text
+            }
+
+            unified = self._try_unified_source_from_candidates(
+                text, font_style, all_cands
+            )
+            if unified is not None:
+                u_images, u_tabs, u_srcs, u_source = unified
+                logger.info("统一来源: %s (%s/%d字)", u_source, font_style, len(text))
+                warnings.append(f"统一来源: {u_source}")
                 if idx > 0:
-                    warnings.append(
-                        f"首选{priority[0]}中部分字缺失，全部统一使用{font_style}"
-                    )
+                    warnings.append(f"首选{priority[0]}降级至{font_style}")
+                return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
 
-                # ── Try source unification (同源同体) ────────
-                # Round 1: n=5 candidates per char
-                all_cands = {
-                    char: self._fetch_all_candidates(char, font_style)
-                    for char in text
-                }
+            logger.info("n=5 无统一来源, 扩大至 n=10")
+            all_cands_wide = {
+                char: self._fetch_all_candidates(char, font_style, n=10)
+                for char in text
+            }
 
-                # Level 1: fully unified source
-                unified = self._try_unified_source_from_candidates(
-                    text, font_style, all_cands
-                )
-                if unified is not None:
-                    u_images, u_tabs, u_srcs, u_source = unified
-                    logger.info("统一来源: %s (%d字)", u_source, len(text))
-                    warnings.append(f"统一来源: {u_source}")
-                    return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
+            unified = self._try_unified_source_from_candidates(
+                text, font_style, all_cands_wide
+            )
+            if unified is not None:
+                u_images, u_tabs, u_srcs, u_source = unified
+                logger.info("统一来源(wide): %s (%s/%d字)", u_source, font_style, len(text))
+                warnings.append(f"统一来源: {u_source}")
+                if idx > 0:
+                    warnings.append(f"首选{priority[0]}降级至{font_style}")
+                return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
 
-                # Round 2: widen pool to n=10 and retry
-                logger.info("n=5 无统一来源, 扩大至 n=10 重试")
-                all_cands_wide = {
-                    char: self._fetch_all_candidates(char, font_style, n=10)
-                    for char in text
-                }
+            # ★ Deferred: chars found but no unified source → save as fallback
+            # and continue to next font (隶书同源 > 篆书异源)
+            logger.warning(
+                "%s 无统一来源, 记录备胎, 继续尝试降级字体", font_style
+            )
 
-                unified = self._try_unified_source_from_candidates(
-                    text, font_style, all_cands_wide
-                )
-                if unified is not None:
-                    u_images, u_tabs, u_srcs, u_source = unified
-                    logger.info("统一来源(wide): %s (%d字)", u_source, len(text))
-                    warnings.append(f"统一来源: {u_source}")
-                    return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
-
-                # Level 2: majority source from wide pool
+            if best_fallback is None:
+                # Build best non-unified result for this font
                 maj = self._majority_source_fallback(text, all_cands_wide)
                 if maj is not None:
                     m_images, m_tabs, m_srcs, m_source, fb_chars = maj
-                    logger.info(
-                        "多数来源: %s (%d/%d字)",
-                        m_source, len(text) - len(fb_chars), len(text),
-                    )
+                    fb_warnings = list(warnings)
                     if fb_chars:
-                        warnings.append(
-                            f"主来源 {m_source}，「{'」「'.join(fb_chars)}」使用次优来源"
+                        fb_warnings.append(
+                            f"主来源 {m_source}，「{'」「'.join(fb_chars)}」使用次优"
                         )
                     else:
-                        warnings.append(f"统一来源: {m_source}")
-                    return m_images, font_style, idx > 0, m_tabs, m_srcs, warnings
-
-                # Level 3: minimum style loss fallback
-                msl = self._min_style_loss_fallback(text, all_cands_wide)
-                if msl is not None:
-                    s_images, s_tabs, s_srcs, s_source, s_fb = msl
-                    if s_fb:
-                        warnings.append(
-                            f"最小损失来源 {s_source}，「{'」「'.join(s_fb)}」使用次优"
-                        )
-                    else:
-                        warnings.append(f"统一来源: {s_source}")
-                    return s_images, font_style, idx > 0, s_tabs, s_srcs, warnings
-
-                # Level 4: per-char best (last resort)
-                unique_sources = list(dict.fromkeys(src_names))
-                if len(unique_sources) > 1:
-                    warnings.append(
-                        f"无统一来源，各字分别取最优: {', '.join(unique_sources)}"
+                        fb_warnings.append(f"统一来源: {m_source}")
+                    best_fallback = (
+                        m_images, font_style, idx > 0, m_tabs, m_srcs, fb_warnings
                     )
-                return images, font_style, idx > 0, tabs, src_names, warnings
+                else:
+                    msl = self._min_style_loss_fallback(text, all_cands_wide)
+                    if msl is not None:
+                        s_images, s_tabs, s_srcs, s_source, s_fb = msl
+                        fb_warnings = list(warnings)
+                        if s_fb:
+                            fb_warnings.append(
+                                f"最小损失来源 {s_source}，「{'」「'.join(s_fb)}」使用次优"
+                            )
+                        best_fallback = (
+                            s_images, font_style, idx > 0, s_tabs, s_srcs, fb_warnings
+                        )
+
+            # continue to next font — don't return!
+
+        # All fonts tried, no perfect unified source
+        if best_fallback is not None:
+            logger.warning("所有字体无完美统一来源, 启用最优备胎: %s", best_fallback[1])
+            return best_fallback
 
         # ── Pass 2: no single style covers all — find best coverage ──
         logger.warning("No single font style covers all chars in '%s'", text)
@@ -909,11 +915,22 @@ class CalligraphyScraper:
         char: str, font_style: str, tab_name: str,
         img: Image.Image, source_name: str = "",
     ) -> None:
+        """Atomic cache write — temp file + os.replace prevents corrupt PNGs."""
+        import tempfile as _tf
+
         path = CalligraphyScraper._cache_path(char, font_style, tab_name)
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            img.save(path, "PNG")
+            fd, tmp = _tf.mkstemp(dir=path.parent, suffix=".tmp")
+            os.close(fd)
+            img.save(tmp, "PNG")
+            os.replace(tmp, path)
             if source_name:
                 meta = CalligraphyScraper._cache_meta_path(char, font_style, tab_name)
                 meta.write_text(source_name, encoding="utf-8")
         except (OSError, IOError) as exc:
             logger.warning("Cache write failed: %s", exc)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass

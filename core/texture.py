@@ -56,17 +56,38 @@ class StoneTexture:
 
     @staticmethod
     def _frame_roughness(alpha: np.ndarray, strength: float) -> np.ndarray:
-        """Erode border pixels with noise-gated mask for natural edge breakup."""
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-        eroded = cv2.erode(alpha, kernel, iterations=1)
+        """
+        Block-shaped stone chipping effect.
 
-        # Only erode where random noise says so (probability ∝ strength)
-        noise_gate = np.random.random(alpha.shape).astype(np.float32)
-        threshold = 1.0 - strength * 0.15
-        mask = noise_gate > threshold
+        Physical basis: stone fractures along cleavage planes, producing
+        irregular block-shaped chips with directional coherence.
+        Uses low-frequency Gaussian-smoothed noise (not salt noise or
+        cubic interpolation which causes ringing artifacts).
+        """
+        if strength <= 0:
+            return alpha
+
+        h, w = alpha.shape
+
+        # Low-frequency block noise via Gaussian blur
+        raw = np.random.random((h, w)).astype(np.float32)
+        sigma = max(6.0, min(w, h) * 0.015)
+        blurred = cv2.GaussianBlur(raw, (0, 0), sigmaX=sigma, sigmaY=sigma)
+
+        n_min, n_max = blurred.min(), blurred.max()
+        if n_max > n_min:
+            blurred = (blurred - n_min) / (n_max - n_min)
+
+        # Threshold → block-shaped chip mask (more strength = more chips)
+        threshold = 1.0 - strength * 0.25
+        chip_mask = blurred > threshold
+
+        # Erode edges (interior strokes protected by erosion locality)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        eroded = cv2.erode(alpha, kernel, iterations=2)
 
         result = alpha.copy()
-        result[mask] = eroded[mask]
+        result[chip_mask] = eroded[chip_mask]
         return result
 
     @staticmethod

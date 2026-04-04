@@ -36,7 +36,7 @@ class Placement:
 class SealLayout:
     """Arrange character masks inside a text-area rectangle."""
 
-    MARGIN_RATIO = 0.15  # padding inside each grid cell
+    MARGIN_RATIO = 0.10  # padding inside each grid cell (0.15 was too loose)
 
     def arrange(
         self,
