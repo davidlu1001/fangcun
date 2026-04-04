@@ -9,7 +9,7 @@ Modular `core/` package with zero UI dependencies. Two thin entry points share t
 ```
 core/
 ├── __init__.py      # SealGenerator — unified pipeline orchestrator
-├── scraper.py       # ygsf.com API client (AES-ECB encrypted) + disk cache + local font fallback
+├── scraper.py       # ygsf.com API + 5-level source unification + scoring + cache
 ├── extractor.py     # Three-tier polarity normalization + two-phase 印谱 extraction
 ├── layout.py        # Traditional right-to-left vertical layout (1–4+ chars)
 ├── renderer.py      # Baiwen/zhuwen rendering, oval/square shapes, double-line frames
@@ -18,67 +18,71 @@ app.py               # Gradio Web UI (主入口)
 cli.py               # CLI batch entry with rich progress (次入口)
 ```
 
-## Key Design Decisions
+## Scraper: 5-level source selection (同源同体)
 
-- **core/ is UI-agnostic**: only accepts params, returns PIL.Image. Never imports gradio or rich.
-- **Scraper uses AES-ECB encryption**: ygsf.com API requires encrypted request/response. Protocol in `core/scraper.py` header.
-- **Tab priority (字典→真迹, never 字库)**: `type=3` preferred, `type=2` fallback, `type=1` excluded.
-- **Font consistency (同印同体)**: `fetch_chars_consistent()` tries each priority for ALL characters before falling back. No 行书/草书 ever.
-- **Top-N candidate scoring**: 5 candidates, resolution (0–30) + contrast (0–50) + coverage (0–20). Raw images + source_name — no inversion in scraper.
-- **Simplified→traditional fallback**: `opencc` auto-tries 蘇 when 苏 fails.
+Beyond same script style (同印同体), the scraper pursues same *source* (碑帖) for visual consistency. Five levels, each falling back to the next:
 
-### Extractor: The hardest engineering problem
+```
+Level 1: 统一来源 n=5    all chars from one source (intersection)
+Level 2: 统一来源 n=10   wider candidate pool retry
+Level 3: 多数来源 >50%   majority vote, fallback for uncovered chars
+Level 4: 最小损失来源     coverage×100 − score_loss ranking
+Level 5: 各字独立最优     per-char best (last resort)
+```
 
-印谱 images (鸟虫篆全书 etc.) have inverted polarity: white stroke slots carved into black stone, wrapped in transparent padding. Multiple failed approaches taught us what works.
+**Image scoring** (0–100): resolution (0–30) + contrast (0–50) + coverage (0–20)
+- 印谱 fragmentation hard-reject: only when light_ratio > 0.15 in opaque region (prevents false kills on multi-stroke chars like 道/轼)
+- 印谱 source base penalty: -10
+- Inferior style penalty: -25 (金文/简帛 sources unsuitable for seal carving)
+- `KNOWN_YINPU_SOURCES` and `INFERIOR_STYLE_SOURCES` sets in extractor/scraper
+
+**Other scraper decisions**:
+- Tab priority: 字典 (type=3) → 真迹 (type=2), never 字库 (type=1)
+- Font consistency: all chars must share same script. 闲章: 篆→隶→楷; 名章: 隶→楷
+- Simplified→traditional: opencc auto-tries 蘇 when 苏 fails
+- AES-ECB encrypted API. Protocol in `scraper.py` header.
+
+## Extractor: Three-tier polarity + two-phase 印谱 extraction
 
 **Three-tier polarity detection** (`_normalize_to_black_on_white`):
 - Tier 1: `KNOWN_YINPU_SOURCES` whitelist → two-phase alpha extraction
 - Tier 2: Alpha semantic detection (bright pixel ratio in opaque region)
 - Tier 3: Morphological erosion fallback
 
-**Two-phase 印谱 extraction** (`_extract_yinpu_strokes`) — handles BOTH polarity and frame removal in one step:
+**Two-phase `_extract_yinpu_strokes`** (handles polarity AND frame removal):
 
-Phase 1 — Aggregated Alpha CCA:
-- Find largest opaque connected component (stone surface)
-- Aggregate nearby large chunks (area > 5%, distance < 2× short side)
-- Produces true stone surface bounding box, filtering page scan borders
+Phase 1 — Per-chunk Alpha CCA:
+- Find stone surface connected components, filter by area (>15%) and proximity
+- Each chunk processed independently (handles cracked stone)
+- Mid-60% sampling for edge scan (avoids corner cross-contamination)
 
-Phase 2 — CCA bbox edge inset:
-- Scan inward from each CCA bbox edge
-- Require 3 consecutive rows with opaque ratio >= 50% (noise-resistant)
-- Everything before = frame channel, stripped with 1px safety buffer
-- Only transparent holes (α<128) within the inset region become strokes
+Phase 2 — Edge inset per chunk:
+- Consecutive-3-row opaque scan (noise-resistant)
+- MIN_INSET floor: max(6, short_side × 0.012)
+- Safety buffer: 2px
+- Only transparent holes (α<128) within inset region become strokes
 
-**Failed approaches** (for future reference):
-- `_composite_and_invert`: padding and strokes both become black → white block
-- CCA frame removal: fails when frame and stroke pixels are 粘连 (connected)
-- 1D projection with full-image threshold: fails when bbox << image size (padding)
-- Single-row opaque scan: noise pixels in frame channels cause early stop
-
-### Other design decisions
-
-- **Binarization**: Otsu for 字典/本地 (never adaptive with small block — hollow outlines); bilateral filter + adaptive for 真迹
-- **Cache**: `~/.seal_gen/cache/{char}_{font}_{tab}.png` + `.src` metadata
-- **Local font fallback**: serif preferred (思源宋体 > 黑体)
-- **Inversion only in extractor, never scraper** — ensures all chars in a seal get identical processing
+**Binarization**: Otsu for 字典/本地; bilateral filter + adaptive for 真迹. Never adaptive with small block on clean images (hollow outlines).
 
 ## Data Flow
 
 ```
 SealGenerator.generate()
-  → scraper.fetch_chars_consistent()       # same style for all chars (同印同体)
-    → _get_or_fetch(char, font)            # 字典→真迹, simplified→traditional
-      → _fetch_from_web()                  # AES-encrypted API
-        → _download_best_image()           # top-5 scoring → (img, source_name)
+  → scraper.fetch_chars_consistent()
+    → _get_or_fetch()                     # cache → web, simplified→traditional
+    → _fetch_all_candidates(n=5/10)       # multi-candidate pool for voting
+    → _try_unified_source_from_candidates # Level 1-2: source intersection
+    → _majority_source_fallback           # Level 3: >50% coverage vote
+    → _min_style_loss_fallback            # Level 4: coverage×100 − loss
   → extractor.extract(img, tab, source_name)
-    → _normalize_to_black_on_white()       # Tier 1/2/3 polarity defense
-      → _extract_yinpu_strokes()           # two-phase: CCA bbox + edge inset
+    → _normalize_to_black_on_white()      # Tier 1/2/3
+      → _extract_yinpu_strokes()          # per-chunk CCA + edge inset
     → _binarize_otsu() / _binarize_adaptive()
     → _denoise() → _crop_bbox()
-  → layout.arrange()                       # traditional vertical layout (列优先)
-  → renderer.render()                      # baiwen/zhuwen RGBA output
-  → texture.apply()                        # stone-carved effects (skip if grain=0)
-  → rotate + preview                       # final transparent + white-bg
+  → layout.arrange()                      # 列優先 vertical layout
+  → renderer.render()                     # baiwen/zhuwen RGBA
+  → texture.apply()                       # stone effects (skip if grain=0)
+  → rotate + preview
 ```
 
 ## Running
@@ -92,3 +96,9 @@ python cli.py --batch chars.txt --output-dir ./seals/
 ## Dependencies
 
 `pycryptodome` (AES), `opencv-python` (CV), `opencc-python-reimplemented` (简→繁), `gradio` (UI), `rich` (CLI), `fake-useragent` (scraping).
+
+## Conventions
+
+- Inversion/normalization ONLY in extractor, never scraper
+- Cache: `~/.seal_gen/cache/{char}_{font}_{tab}.png` + `.src` metadata
+- Local font fallback: serif preferred (思源宋体 > 黑体)
