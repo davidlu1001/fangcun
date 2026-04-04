@@ -183,19 +183,20 @@ class CharExtractor:
     @staticmethod
     def _extract_yinpu_strokes(img: Image.Image) -> np.ndarray:
         """
-        印谱字形提取：两阶段终极算法。
+        印谱字形提取：两阶段算法，逐块独立处理。
 
-        阶段1 — 聚合 Alpha CCA：
-          找到最大不透明连通块（石面主体），聚合周围大型碎块，
-          得到印章真实石面的联合 Bounding Box。
-          - 面积 > 最大块 5%（过滤噪点）
-          - 中心距 < 主块短边 2 倍（过滤远处页面边框）
+        阶段1 — Alpha CCA：
+          找到最大不透明连通块，筛选所有符合条件的石面碎块
+          （面积 > 最大块 5%，中心距 < 主块短边 2 倍）。
 
-        阶段2 — CCA bbox 内边缘内缩：
-          从联合 bbox 各边缘向内逐行扫描 alpha，
-          找到首个"不透明占比 >= 50%"的行 = 石面开始，
-          该行之前的透明通道 = 印框刻槽，安全剥离。
-          替代了所有版本的 _remove_seal_frame。
+        阶段2 — 逐块独立内缩提取：
+          对每个石面碎块分别做边缘内缩扫描 + 字形提取，
+          结果写入同一个 gray 画布。
+          解决断裂古印（裂缝间隙不会被误提取为字形）。
+
+        内缩扫描改进：
+          - 中段采样（中间 60%）避免角落交叉区域污染
+          - 连续 3 行判定防止噪点导致过早停止
         """
         if img.mode not in ("RGBA", "LA"):
             bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -205,7 +206,7 @@ class CharExtractor:
         alpha = np.array(img.split()[-1])
         opaque = (alpha >= 128).astype(np.uint8)
 
-        # ── 阶段1: 聚合 Alpha CCA ───────────────────────────
+        # ── 阶段1: Alpha CCA — 筛选石面碎块 ────────────────
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
             opaque, connectivity=8
         )
@@ -225,93 +226,80 @@ class CharExtractor:
             int(stats[largest_label, cv2.CC_STAT_HEIGHT]),
         )
 
-        min_x, min_y = int(alpha.shape[1]), int(alpha.shape[0])
-        max_x, max_y = 0, 0
-        valid_chunks = 0
-
+        # Collect valid chunk indices
+        valid_chunks: list[int] = []
         for i in range(1, num_labels):
-            area = int(stats[i, cv2.CC_STAT_AREA])
-            if area <= max_area * 0.05:
+            if int(stats[i, cv2.CC_STAT_AREA]) <= max_area * 0.05:
                 continue
-
             cx = stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH] / 2.0
             cy = stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] / 2.0
             if abs(cx - largest_cx) >= ref_dim * 2.0 or abs(cy - largest_cy) >= ref_dim * 2.0:
                 continue
+            valid_chunks.append(i)
 
-            min_x = min(min_x, int(stats[i, cv2.CC_STAT_LEFT]))
-            min_y = min(min_y, int(stats[i, cv2.CC_STAT_TOP]))
-            max_x = max(max_x, int(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH] - 1))
-            max_y = max(max_y, int(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] - 1))
-            valid_chunks += 1
-
-        if valid_chunks == 0:
-            min_x = int(stats[largest_label, cv2.CC_STAT_LEFT])
-            min_y = int(stats[largest_label, cv2.CC_STAT_TOP])
-            max_x = min_x + int(stats[largest_label, cv2.CC_STAT_WIDTH]) - 1
-            max_y = min_y + int(stats[largest_label, cv2.CC_STAT_HEIGHT]) - 1
-            valid_chunks = 1
-
-        by0, bx0, by1, bx1 = min_y, min_x, max_y, max_x
-        bh = by1 - by0 + 1
-        bw = bx1 - bx0 + 1
+        if not valid_chunks:
+            valid_chunks = [largest_label]
 
         logger.info(
-            "Alpha CCA 阶段1: 聚合 %d 石面碎块, bbox=%dx%d @(%d,%d)",
-            valid_chunks, bw, bh, bx0, by0,
+            "Alpha CCA 阶段1: %d 石面碎块 (labels=%s)",
+            len(valid_chunks), valid_chunks,
         )
 
-        # ── 阶段2: CCA bbox 内边缘扫描，剥离印框 ────────────
-        bbox_alpha = alpha[by0 : by1 + 1, bx0 : bx1 + 1]
-        max_scan = max(5, int(min(bh, bw) * 0.15))
-
-        def scan_frame_thickness(strips: np.ndarray) -> int:
-            """
-            Scan inward from CCA bbox edge. Require 3 consecutive rows
-            with opaque ratio >= 50% to confirm stone surface.
-            Sporadic opaque noise pixels in frame channels won't trigger
-            early stop.
-            """
-            CONSECUTIVE = 3
-            run = 0
-            for t in range(min(max_scan, len(strips))):
-                if (strips[t] >= 128).mean() >= 0.50:
-                    run += 1
-                    if run >= CONSECUTIVE:
-                        return max(t - CONSECUTIVE + 2, 1)
-                else:
-                    run = 0
-            return max_scan
-
-        mt = scan_frame_thickness(bbox_alpha)
-        mb = scan_frame_thickness(bbox_alpha[::-1])
-        ml = scan_frame_thickness(bbox_alpha.T)
-        mr = scan_frame_thickness(bbox_alpha[:, ::-1].T)
-
-        corner_buf = 1  # extra safety margin for thin residual
-        iy0 = by0 + mt + 1 + corner_buf
-        iy1 = by1 - mb - 1 - corner_buf
-        ix0 = bx0 + ml + 1 + corner_buf
-        ix1 = bx1 - mr - 1 - corner_buf
-
-        if iy0 >= iy1 or ix0 >= ix1:
-            logger.warning(
-                "内缩过度 (mt=%d mb=%d ml=%d mr=%d), 回退到 CCA bbox",
-                mt, mb, ml, mr,
-            )
-            iy0, iy1, ix0, ix1 = by0, by1, bx0, bx1
-
-        logger.info(
-            "Alpha CCA 阶段2: 印框剥离 top=%d bot=%d left=%d right=%d → 提取区 %dx%d",
-            mt, mb, ml, mr, ix1 - ix0 + 1, iy1 - iy0 + 1,
-        )
-
-        # ── 提取字形刻槽 → 白底黑字 ─────────────────────────
+        # ── 阶段2: 逐块独立内缩提取 ─────────────────────────
         gray = np.full(alpha.shape, 255, dtype=np.uint8)
-        inner_alpha = alpha[iy0 : iy1 + 1, ix0 : ix1 + 1]
-        gray[iy0 : iy1 + 1, ix0 : ix1 + 1] = np.where(
-            inner_alpha < 128, 0, 255
-        ).astype(np.uint8)
+
+        for chunk_label in valid_chunks:
+            chy0 = int(stats[chunk_label, cv2.CC_STAT_TOP])
+            chx0 = int(stats[chunk_label, cv2.CC_STAT_LEFT])
+            chh = int(stats[chunk_label, cv2.CC_STAT_HEIGHT])
+            chw = int(stats[chunk_label, cv2.CC_STAT_WIDTH])
+            chy1 = chy0 + chh - 1
+            chx1 = chx0 + chw - 1
+
+            ch_alpha = alpha[chy0 : chy1 + 1, chx0 : chx1 + 1]
+            ch_max_scan = max(5, int(min(chh, chw) * 0.15))
+
+            def _scan(strips: np.ndarray, ms: int = ch_max_scan) -> int:
+                """Mid-60% sampling + consecutive-3 scan."""
+                CONSECUTIVE = 3
+                run = 0
+                for t in range(min(ms, len(strips))):
+                    row = strips[t]
+                    n = len(row)
+                    mid_s, mid_e = int(n * 0.20), int(n * 0.80)
+                    sample = row[mid_s:mid_e] if (mid_e - mid_s) > 3 else row
+                    if len(sample) > 0 and (sample >= 128).mean() >= 0.50:
+                        run += 1
+                        if run >= CONSECUTIVE:
+                            return max(t - CONSECUTIVE + 2, 1)
+                    else:
+                        run = 0
+                return ms
+
+            cmt = _scan(ch_alpha)
+            cmb = _scan(ch_alpha[::-1])
+            cml = _scan(ch_alpha.T)
+            cmr = _scan(ch_alpha[:, ::-1].T)
+
+            buf = 2  # safety margin
+            ciy0 = chy0 + cmt + buf
+            ciy1 = chy1 - cmb - buf
+            cix0 = chx0 + cml + buf
+            cix1 = chx1 - cmr - buf
+
+            if ciy0 >= ciy1 or cix0 >= cix1:
+                ciy0, ciy1, cix0, cix1 = chy0, chy1, chx0, chx1
+
+            logger.info(
+                "碎块 #%d: %dx%d top=%d bot=%d left=%d right=%d → 提取区 %dx%d",
+                chunk_label, chw, chh, cmt, cmb, cml, cmr,
+                cix1 - cix0 + 1, ciy1 - ciy0 + 1,
+            )
+
+            inner = alpha[ciy0 : ciy1 + 1, cix0 : cix1 + 1]
+            gray[ciy0 : ciy1 + 1, cix0 : cix1 + 1] = np.where(
+                inner < 128, 0, 255
+            ).astype(np.uint8)
 
         return gray
 
