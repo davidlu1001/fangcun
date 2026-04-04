@@ -266,9 +266,21 @@ class CharExtractor:
         max_scan = max(5, int(min(bh, bw) * 0.15))
 
         def scan_frame_thickness(strips: np.ndarray) -> int:
+            """
+            Scan inward from CCA bbox edge. Require 3 consecutive rows
+            with opaque ratio >= 50% to confirm stone surface.
+            Sporadic opaque noise pixels in frame channels won't trigger
+            early stop.
+            """
+            CONSECUTIVE = 3
+            run = 0
             for t in range(min(max_scan, len(strips))):
                 if (strips[t] >= 128).mean() >= 0.50:
-                    return max(t, 1)
+                    run += 1
+                    if run >= CONSECUTIVE:
+                        return max(t - CONSECUTIVE + 2, 1)
+                else:
+                    run = 0
             return max_scan
 
         mt = scan_frame_thickness(bbox_alpha)
@@ -276,10 +288,11 @@ class CharExtractor:
         ml = scan_frame_thickness(bbox_alpha.T)
         mr = scan_frame_thickness(bbox_alpha[:, ::-1].T)
 
-        iy0 = by0 + mt + 1
-        iy1 = by1 - mb - 1
-        ix0 = bx0 + ml + 1
-        ix1 = bx1 - mr - 1
+        corner_buf = 1  # extra safety margin for thin residual
+        iy0 = by0 + mt + 1 + corner_buf
+        iy1 = by1 - mb - 1 - corner_buf
+        ix0 = bx0 + ml + 1 + corner_buf
+        ix1 = bx1 - mr - 1 - corner_buf
 
         if iy0 >= iy1 or ix0 >= ix1:
             logger.warning(
