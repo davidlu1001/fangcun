@@ -101,8 +101,8 @@ class CharExtractor:
         """
         # ── Tier 1: whitelist ────────────────────────────────
         if source_name in KNOWN_YINPU_SOURCES:
-            logger.info("Tier 1: known 印谱 source '%s', inverting", source_name)
-            return self._composite_and_invert(img)
+            logger.info("Tier 1: known 印谱 source '%s', extracting via alpha", source_name)
+            return self._extract_yinpu_strokes(img)
 
         gray = self._composite_to_gray(img)
 
@@ -123,10 +123,10 @@ class CharExtractor:
 
                     if light_ratio > 0.15:
                         logger.info(
-                            "Tier 2: opaque region has %.1f%% bright pixels → 印谱, inverting",
+                            "Tier 2: opaque region has %.1f%% bright pixels → 印谱, extracting via alpha",
                             light_ratio * 100,
                         )
-                        return 255 - gray
+                        return self._extract_yinpu_strokes(img)
 
                     if light_ratio < 0.05:
                         logger.debug(
@@ -168,6 +168,48 @@ class CharExtractor:
                 min_block,
             )
             return 255 - gray
+
+        return gray
+
+    # ── 印谱 extraction ────────────────────────────────────
+
+    @staticmethod
+    def _extract_yinpu_strokes(img: Image.Image) -> np.ndarray:
+        """
+        For 印谱 images: strokes are transparent holes within an opaque block.
+
+        The opaque area (α>128) is the seal surface (background).
+        Transparent holes (α<128) INSIDE the opaque bbox are carved stroke channels.
+        Transparent area OUTSIDE the bbox is padding (not strokes).
+
+        Returns: white-bg + black-strokes grayscale, ready for Otsu.
+        """
+        if img.mode not in ("RGBA", "LA"):
+            # No alpha → fall back to composite-and-invert
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img)
+            return 255 - np.array(bg.convert("L"))
+
+        alpha = np.array(img.split()[-1])
+        opaque = alpha > 128
+
+        coords = np.argwhere(opaque)
+        if coords.size == 0:
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            return np.array(bg.convert("L"))
+
+        y0, x0 = coords.min(axis=0)
+        y1, x1 = coords.max(axis=0)
+
+        # White background everywhere
+        gray = np.full(alpha.shape, 255, dtype=np.uint8)
+
+        # Within opaque bbox: transparent pixels = strokes → black
+        bbox_alpha = alpha[y0 : y1 + 1, x0 : x1 + 1]
+        gray[y0 : y1 + 1, x0 : x1 + 1] = np.where(
+            bbox_alpha < 128, 0, 255
+        ).astype(np.uint8)
 
         return gray
 
