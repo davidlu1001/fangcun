@@ -40,6 +40,8 @@ import subprocess
 import time
 from io import BytesIO
 from pathlib import Path
+
+import cv2
 from typing import Optional
 
 import numpy as np
@@ -503,7 +505,33 @@ class CalligraphyScraper:
         else:  # > 0.60
             coverage_score = max(0.0, (1.0 - coverage) / 0.40) * 20.0
 
-        return res_score + contrast_score + coverage_score
+        base_score = res_score + contrast_score + coverage_score
+
+        # ── Alpha structure penalty ──────────────────────────
+        # Complex alpha (multiple opaque fragments) = harder to extract.
+        # Prefer clean single-block images over multi-fragment 印谱 scans.
+        alpha_penalty = 0.0
+        if img.mode == "RGBA":
+            alpha_arr = np.array(img.split()[3])
+            opaque_mask = (alpha_arr >= 128).astype(np.uint8)
+
+            if opaque_mask.any():
+                n_labels, _, cc_stats, _ = cv2.connectedComponentsWithStats(
+                    opaque_mask, connectivity=8
+                )
+                if n_labels > 1:
+                    cc_max = int(cc_stats[1:, cv2.CC_STAT_AREA].max())
+                    fragment_count = sum(
+                        1
+                        for j in range(1, n_labels)
+                        if cc_stats[j, cv2.CC_STAT_AREA] > cc_max * 0.05
+                    )
+                    if fragment_count == 2:
+                        alpha_penalty = 15.0
+                    elif fragment_count >= 3:
+                        alpha_penalty = 35.0
+
+        return max(0.0, base_score - alpha_penalty)
 
     # ── local fallback ───────────────────────────────────────
 
