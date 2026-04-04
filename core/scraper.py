@@ -442,8 +442,8 @@ class CalligraphyScraper:
                     continue
 
                 # Score raw image — normalization is done in extractor
-                score = self._score_image(img)
                 src = glyph.get("_from", "?")
+                score = self._score_image(img, src)
                 candidates.append((img, score, src))
                 logger.debug(
                     "Candidate: %dx%d score=%.1f from=%s",
@@ -471,45 +471,38 @@ class CalligraphyScraper:
         return best_img, best_src
 
     @staticmethod
-    def _score_image(img: Image.Image) -> float:
+    def _score_image(img: Image.Image, source_name: str = "") -> float:
         """
         Score a candidate image (0–100).
 
-          Resolution  (0–30): short-side relative to 600px (gate)
-          Contrast    (0–50): grayscale std relative to 120 (main discriminator)
-          Coverage    (0–20): binary stroke ratio in 15%–60% sweet spot
-
-        Higher contrast denominator (120 vs 80) spreads scores among
-        already-clean images — std=93 → 38.8 vs std=119 → 49.6.
+          Resolution  (0–30): short-side relative to 600px
+          Contrast    (0–50): grayscale std relative to 120
+          Coverage    (0–20): minority-color ratio in 15%–60%
+          Alpha penalty: multi-fragment RGBA images penalized
+          Yinpu penalty: known 印谱 sources get base -10
         """
         gray = np.array(img.convert("L"), dtype=np.float64)
         short_side = min(img.width, img.height)
 
-        # Resolution: 0–30 (gate — most images pass easily)
         res_score = min(short_side / 600.0, 1.0) * 30.0
 
-        # Contrast: 0–50 (main quality signal for calligraphy)
         std = float(np.std(gray))
         contrast_score = min(std / 120.0, 1.0) * 50.0
 
-        # Coverage: 0–20 (use minority color as stroke proxy —
-        # works regardless of black-on-white or white-on-black)
         binary = gray < 128
         coverage = float(binary.mean())
-        coverage = min(coverage, 1.0 - coverage)  # minority = stroke
+        coverage = min(coverage, 1.0 - coverage)
 
         if 0.15 <= coverage <= 0.60:
             coverage_score = 20.0
         elif coverage < 0.15:
             coverage_score = (coverage / 0.15) * 20.0
-        else:  # > 0.60
+        else:
             coverage_score = max(0.0, (1.0 - coverage) / 0.40) * 20.0
 
         base_score = res_score + contrast_score + coverage_score
 
         # ── Alpha structure penalty ──────────────────────────
-        # Complex alpha (multiple opaque fragments) = harder to extract.
-        # Prefer clean single-block images over multi-fragment 印谱 scans.
         alpha_penalty = 0.0
         if img.mode == "RGBA":
             alpha_arr = np.array(img.split()[3])
@@ -527,11 +520,16 @@ class CalligraphyScraper:
                         if cc_stats[j, cv2.CC_STAT_AREA] > cc_max * 0.05
                     )
                     if fragment_count == 2:
-                        alpha_penalty = 15.0
+                        alpha_penalty = 30.0
                     elif fragment_count >= 3:
-                        alpha_penalty = 35.0
+                        alpha_penalty = 50.0
 
-        return max(0.0, base_score - alpha_penalty)
+        # ── Known 印谱 source base penalty ───────────────────
+        from .extractor import KNOWN_YINPU_SOURCES
+
+        yinpu_penalty = 10.0 if source_name in KNOWN_YINPU_SOURCES else 0.0
+
+        return max(0.0, base_score - alpha_penalty - yinpu_penalty)
 
     # ── local fallback ───────────────────────────────────────
 
