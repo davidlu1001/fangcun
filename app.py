@@ -9,6 +9,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from pathlib import Path
 
@@ -208,4 +209,5 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0")
+    is_hf_space = os.environ.get("SPACE_ID") is not None
+    demo.launch(server_name="0.0.0.0" if is_hf_space else "127.0.0.1")
