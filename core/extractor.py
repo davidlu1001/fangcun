@@ -221,76 +221,88 @@ class CharExtractor:
 
     # ── Seal frame removal ───────────────────────────────────
 
-    @staticmethod
-    def _remove_seal_frame(binary: np.ndarray) -> np.ndarray:
+    def _remove_seal_frame(self, binary: np.ndarray) -> np.ndarray:
         """
-        Remove rectangular seal frame lines from 印谱 binary mask.
+        Remove seal frame lines via 1D projection, anchored to content bbox.
 
-        Uses 1D pixel projection instead of connected-component analysis.
-        CCA fails when frame pixels and stroke pixels are physically connected
-        (粘连), merging into one large component where fill_ratio/aspect are
-        useless. Projection-based detection is immune to connectivity.
+        Key fix: old version used full-image dimensions (W×0.50) as threshold.
+        When the image has large transparent padding (bbox_w << W), the frame's
+        actual row_sum is far below W×0.50, so frames were never detected.
 
-        Algorithm:
-          1. Project rows/cols: count white pixels per row and per column
-          2. Frame lines span full width/height → pixel count > 50% threshold
-             (no calligraphy stroke can reach 50% of a full row in a seal)
-          3. Only scan outer 15% (top/bottom for rows, left/right for cols)
-             — center zone is absolutely protected
-          4. Convolve FIRST to dilate thick/double frames, THEN hard-truncate
-             center zone (prevents dilation from leaking inward)
+        New version finds the content bounding box first, then uses bbox
+        dimensions for threshold (70%) and scan region (15%). Padding-immune.
 
-        Protection for 「一」: its pixels are in the center zone (>15% from
-        edges), so the scan region never includes them.
+        Threshold 70% (not 50%): frame lines span ~100% of bbox width,
+        while calligraphy strokes rarely exceed 70%. Safe margin.
+
+        Execution order: convolve FIRST, then hard-truncate center zone.
+        Reverse order lets dilation leak past the protection boundary.
         """
         h, w = binary.shape
-        result = binary.copy()
 
-        threshold_w = w * 0.50
-        threshold_h = h * 0.50
+        # ── Step 0: find content bbox ────────────────────────
+        content = binary > 0
+        if not content.any():
+            return binary.copy()
 
-        scan_y = max(5, int(h * 0.15))
-        scan_x = max(5, int(w * 0.15))
+        rows_any = np.where(content.any(axis=1))[0]
+        cols_any = np.where(content.any(axis=0))[0]
+        by0, by1 = int(rows_any[0]), int(rows_any[-1])
+        bx0, bx1 = int(cols_any[0]), int(cols_any[-1])
+        bbox_h = by1 - by0 + 1
+        bbox_w = bx1 - bx0 + 1
 
-        erase_r = max(3, int(min(w, h) * 0.015))
+        # ── Step 1: bbox-based thresholds ────────────────────
+        threshold_w = bbox_w * 0.70
+        threshold_h = bbox_h * 0.70
+        scan_rows = max(3, int(bbox_h * 0.15))
+        scan_cols = max(3, int(bbox_w * 0.15))
+        erase_r = max(2, int(min(bbox_w, bbox_h) * 0.015))
         kernel = np.ones(2 * erase_r + 1, dtype=int)
 
-        # ── Y-axis projection: top/bottom frame lines ────────
-        row_sums = (binary > 0).sum(axis=1).astype(float)
+        result = binary.copy()
+
+        # ── Step 2: Y-axis projection (top/bottom frames) ───
+        row_sums = content.sum(axis=1).astype(float)
 
         frame_rows = np.zeros(h, dtype=bool)
-        frame_rows[:scan_y] = row_sums[:scan_y] > threshold_w
-        frame_rows[h - scan_y :] = row_sums[h - scan_y :] > threshold_w
+        top_end = by0 + scan_rows
+        bot_start = by1 - scan_rows + 1
+
+        frame_rows[by0:top_end] = row_sums[by0:top_end] > threshold_w
+        frame_rows[bot_start : by1 + 1] = row_sums[bot_start : by1 + 1] > threshold_w
 
         if frame_rows.any():
-            # Convolve FIRST (dilate each hit independently)
-            dilated_rows = np.convolve(frame_rows.astype(int), kernel, mode="same") > 0
-            # THEN hard-truncate center — prevents edge dilation from leaking in
-            dilated_rows[scan_y : h - scan_y] = False
-            result[dilated_rows, :] = 0
+            dilated = np.convolve(frame_rows.astype(int), kernel, mode="same") > 0
+            # Hard-truncate: outside bbox and center zone
+            dilated[:by0] = False
+            dilated[top_end:bot_start] = False
+            dilated[by1 + 1 :] = False
+            result[dilated, :] = 0
             logger.info(
-                "移除上下印框: %d rows erased (scan_y=%d, erase_r=%d)",
-                int(dilated_rows.sum()),
-                scan_y,
-                erase_r,
+                "移除上下印框: %d rows (bbox_h=%d, scan=%d, thr=%.0f, erase_r=%d)",
+                int(dilated.sum()), bbox_h, scan_rows, threshold_w, erase_r,
             )
 
-        # ── X-axis projection: left/right frame lines ────────
-        col_sums = (binary > 0).sum(axis=0).astype(float)
+        # ── Step 3: X-axis projection (left/right frames) ───
+        col_sums = content.sum(axis=0).astype(float)
 
         frame_cols = np.zeros(w, dtype=bool)
-        frame_cols[:scan_x] = col_sums[:scan_x] > threshold_h
-        frame_cols[w - scan_x :] = col_sums[w - scan_x :] > threshold_h
+        left_end = bx0 + scan_cols
+        right_start = bx1 - scan_cols + 1
+
+        frame_cols[bx0:left_end] = col_sums[bx0:left_end] > threshold_h
+        frame_cols[right_start : bx1 + 1] = col_sums[right_start : bx1 + 1] > threshold_h
 
         if frame_cols.any():
-            dilated_cols = np.convolve(frame_cols.astype(int), kernel, mode="same") > 0
-            dilated_cols[scan_x : w - scan_x] = False
-            result[:, dilated_cols] = 0
+            dilated = np.convolve(frame_cols.astype(int), kernel, mode="same") > 0
+            dilated[:bx0] = False
+            dilated[left_end:right_start] = False
+            dilated[bx1 + 1 :] = False
+            result[:, dilated] = 0
             logger.info(
-                "移除左右印框: %d cols erased (scan_x=%d, erase_r=%d)",
-                int(dilated_cols.sum()),
-                scan_x,
-                erase_r,
+                "移除左右印框: %d cols (bbox_w=%d, scan=%d, thr=%.0f, erase_r=%d)",
+                int(dilated.sum()), bbox_w, scan_cols, threshold_h, erase_r,
             )
 
         return result
