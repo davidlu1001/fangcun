@@ -16,7 +16,7 @@ import logging
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +31,16 @@ class CharExtractor:
     def extract(self, img: Image.Image, source: str = "字典") -> Image.Image:
         """
         Args:
-            img:    raw calligraphy image (any mode)
+            img:    raw calligraphy image (any mode, any polarity)
             source: '字典' | '真迹' | '本地' — controls preprocessing intensity
 
         Returns:
             mode "L" mask cropped to bounding box. 255 = stroke, 0 = background.
         """
-        gray = self._to_grayscale(img)
+        # Step 0: normalize to black-on-white regardless of original polarity.
+        # This is done HERE (not in scraper) so all characters in a seal
+        # go through identical normalization — no per-image inversion drift.
+        gray = self._normalize_to_black_on_white(img)
 
         if source == "真迹":
             # Enhanced preprocessing for noisy originals:
@@ -74,15 +77,46 @@ class CharExtractor:
     # ── internal steps ───────────────────────────────────────
 
     @staticmethod
-    def _to_grayscale(img: Image.Image) -> np.ndarray:
-        """Convert any PIL image to uint8 grayscale numpy array."""
-        if img.mode == "L":
-            return np.array(img)
+    def _normalize_to_black_on_white(img: Image.Image) -> np.ndarray:
+        """
+        Convert any image to uint8 grayscale with guaranteed black-on-white
+        polarity. Handles:
+          - RGBA transparent PNGs (composite onto white)
+          - White-on-black / dark-background scans (auto-invert)
+          - Normal black-on-white (pass through)
+
+        Detection: center-region average brightness.
+          < 128 → dark background → invert
+          >= 128 → light background → keep
+        """
+        # Composite RGBA onto white so transparent pixels → white
         if img.mode == "RGBA":
             bg = Image.new("RGB", img.size, (255, 255, 255))
             bg.paste(img, mask=img.split()[3])
-            return np.array(bg.convert("L"))
-        return np.array(img.convert("L"))
+            gray = np.array(bg.convert("L"))
+        elif img.mode == "L":
+            gray = np.array(img)
+        else:
+            gray = np.array(img.convert("L"))
+
+        # Detect dark-background images by checking BORDER brightness.
+        # Border is mostly background (strokes rarely touch all 4 edges),
+        # so it's a more reliable indicator than center (which may be
+        # filled by thick strokes like 禅, 蘇, causing false positives).
+        h, w = gray.shape
+        border = np.concatenate([
+            gray[0, :], gray[-1, :],   # top & bottom rows
+            gray[:, 0], gray[:, -1],   # left & right columns
+        ])
+
+        if border.size > 0 and float(border.mean()) < 128:
+            logger.info(
+                "Dark background (border=%.0f), inverting to black-on-white",
+                border.mean(),
+            )
+            gray = 255 - gray
+
+        return gray
 
     @staticmethod
     def _binarize(

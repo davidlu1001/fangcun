@@ -44,7 +44,7 @@ from typing import Optional
 
 import numpy as np
 import requests
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 
 try:
     from Crypto.Cipher import AES
@@ -468,9 +468,7 @@ class CalligraphyScraper:
                     )
                     continue
 
-                # Auto-invert dark-background images (common in 印谱 sources)
-                img = self._auto_invert_if_dark(img)
-
+                # Score raw image — normalization is done in extractor
                 score = self._score_image(img)
                 src = glyph.get("_from", "?")
                 candidates.append((img, score, src))
@@ -521,9 +519,11 @@ class CalligraphyScraper:
         std = float(np.std(gray))
         contrast_score = min(std / 120.0, 1.0) * 50.0
 
-        # Coverage: 0–20 (binary threshold at 128)
+        # Coverage: 0–20 (use minority color as stroke proxy —
+        # works regardless of black-on-white or white-on-black)
         binary = gray < 128
         coverage = float(binary.mean())
+        coverage = min(coverage, 1.0 - coverage)  # minority = stroke
 
         if 0.15 <= coverage <= 0.60:
             coverage_score = 20.0
@@ -533,51 +533,6 @@ class CalligraphyScraper:
             coverage_score = max(0.0, (1.0 - coverage) / 0.40) * 20.0
 
         return res_score + contrast_score + coverage_score
-
-    @staticmethod
-    def _auto_invert_if_dark(img: Image.Image) -> Image.Image:
-        """
-        Detect dark-background images (印谱/seal impression scans)
-        and auto-invert to white-background for consistent downstream processing.
-
-        Detection: composite onto white first (so transparent pixels read as
-        white, not black), then check center-region average brightness < 80.
-
-        IMPORTANT: raw RGBA→L ignores alpha, so transparent PNGs with
-        RGB=(0,0,0) everywhere falsely trigger inversion. Must composite first.
-        """
-        # RGBA with significant transparency → already has clean background,
-        # never a dark-background scan. Skip inversion entirely.
-        if img.mode == "RGBA":
-            alpha = np.array(img.split()[3])
-            transparent_ratio = float((alpha == 0).sum()) / alpha.size
-            if transparent_ratio > 0.10:
-                return img
-            # Opaque RGBA — composite onto white for brightness check
-            bg = Image.new("RGB", img.size, (255, 255, 255))
-            bg.paste(img, mask=img.split()[3])
-            gray = np.array(bg.convert("L"))
-        else:
-            gray = np.array(img.convert("L"))
-
-        h, w = gray.shape
-        margin = min(h, w) // 4
-        cy, cx = h // 2, w // 2
-        center = gray[cy - margin : cy + margin, cx - margin : cx + margin]
-
-        if center.size > 0 and float(center.mean()) < 80:
-            logger.info(
-                "Dark background detected (center brightness=%.0f), inverting",
-                center.mean(),
-            )
-            if img.mode == "RGBA":
-                r, g, b, a = img.split()
-                rgb = Image.merge("RGB", (r, g, b))
-                rgb = ImageOps.invert(rgb)
-                return Image.merge("RGBA", (*rgb.split(), a))
-            return ImageOps.invert(img.convert("RGB")).convert(img.mode)
-
-        return img
 
     # ── local fallback ───────────────────────────────────────
 
