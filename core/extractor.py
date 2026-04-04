@@ -229,7 +229,7 @@ class CharExtractor:
         # Collect valid chunk indices
         valid_chunks: list[int] = []
         for i in range(1, num_labels):
-            if int(stats[i, cv2.CC_STAT_AREA]) <= max_area * 0.05:
+            if int(stats[i, cv2.CC_STAT_AREA]) <= max_area * 0.15:
                 continue
             cx = stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH] / 2.0
             cy = stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] / 2.0
@@ -280,6 +280,13 @@ class CharExtractor:
             cmb = _scan(ch_alpha[::-1])
             cml = _scan(ch_alpha.T)
             cmr = _scan(ch_alpha[:, ::-1].T)
+
+            # Minimum inset: even if scan stops early, strip at least this much
+            min_inset = max(6, int(min(chh, chw) * 0.012))
+            cmt = max(cmt, min_inset)
+            cmb = max(cmb, min_inset)
+            cml = max(cml, min_inset)
+            cmr = max(cmr, min_inset)
 
             buf = 2  # safety margin
             ciy0 = chy0 + cmt + buf
