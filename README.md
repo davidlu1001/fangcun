@@ -4,12 +4,15 @@
 
 ## 功能
 
-- **朱白文渲染**：白文（红底白字）、朱文（透明底红字+红框）
+- **朱白文渲染**：白文（红底白字实心填充）、朱文（透明底红字+红框）
 - **形制选择**：方章、竖椭圆（腰圆章，内圈双线框）
-- **书法字源**：自动从 ygsf.com 抓取篆书/隶书/楷书，按章类优先级自动降级
+- **书法字源**：自动从 ygsf.com 抓取篆书/隶书/楷书（优先字典 tab，次选真迹 tab，不用字库）
+- **同印同体**：同一方印章内所有字自动统一为同一种书体，不会混用
+- **简繁自动**：输入简体字自动尝试对应繁体（苏→蘇、轼→軾）
+- **印谱兼容**：自动识别印谱图片（鸟虫篆全书等），三层防御确保极性正确
 - **金石质感**：边框毛边、笔画崩边、印泥颗粒感，可调节强度
-- **传统排版**：1–4字自动竖排，遵循从右到左阅读顺序
-- **双入口**：Gradio Web UI（交互）+ CLI（批量）
+- **传统排版**：1–4字自动竖排，列优先从右到左阅读顺序
+- **双入口**：Gradio Web UI（交互）+ CLI（批量自动化）
 
 ## 快速开始
 
@@ -32,7 +35,7 @@ python app.py
 # 单个
 python cli.py --text "禅" --shape oval --style baiwen --type leisure
 
-# 批量（每行一个词）
+# 批量（每行一个词，用于视频封面流水线）
 python cli.py --batch chars.txt --shape oval --style baiwen --type leisure --output-dir ./seals/
 ```
 
@@ -42,6 +45,7 @@ python cli.py --batch chars.txt --shape oval --style baiwen --type leisure --out
 禅
 苏轼
 极客禅
+天人合一
 ```
 
 ## 项目结构
@@ -49,9 +53,9 @@ python cli.py --batch chars.txt --shape oval --style baiwen --type leisure --out
 ```
 core/
 ├── __init__.py      # SealGenerator 统一入口
-├── scraper.py       # ygsf.com 书法字抓取 + 缓存
-├── extractor.py     # 字形二值化提取
-├── layout.py        # 传统竖排排版
+├── scraper.py       # ygsf.com 书法字抓取 + 评分选图 + 缓存
+├── extractor.py     # 三层极性归一化 + 二值化 + 印框移除
+├── layout.py        # 传统竖排排版（列优先）
 ├── renderer.py      # 白文/朱文渲染
 └── texture.py       # 金石质感滤镜
 app.py               # Gradio Web UI
@@ -65,11 +69,25 @@ cli.py               # CLI 批量入口
 | 闲章 | 篆书 → 隶书 → 楷书 | 行书、草书 |
 | 名章 | 隶书 → 楷书 | 草书、行书 |
 
-字体找不到时自动降级，UI/CLI 中会显示降级提示。
+字体找不到时**整印统一降级**（不会单字降级导致混用），UI/CLI 中会显示降级提示。
 
-## 部署到 Hugging Face Spaces
+## 印谱兼容
+
+来自印谱来源（如鸟虫篆全书、汉印分韵等）的图片与普通字帖极性相反——白色笔画槽刻在黑色石面上。工具通过三层防御自动处理：
+
+1. **白名单**：已知印谱来源直接走 alpha 孔洞提取
+2. **结构检测**：分析不透明区域的亮色像素比例
+3. **形态学兜底**：腐蚀后大块残留 = 深色背景
+
+提取后自动移除矩形印框线（1D 投影法，不依赖连通性）。
+
+## 部署
 
 ```bash
+# 本地运行
+python app.py
+
+# 部署到 Hugging Face Spaces（免费永久可访问）
 # 1. 在 HF 新建 Space，选择 Gradio SDK
 # 2. 上传所有文件
 # 3. 自动构建，获得公开链接
@@ -77,4 +95,4 @@ cli.py               # CLI 批量入口
 
 ## 缓存
 
-抓取的书法图片缓存在 `~/.seal_gen/cache/`，避免重复请求。
+抓取的书法图片缓存在 `~/.seal_gen/cache/`（含来源元数据），避免重复请求。清除缓存：`rm -rf ~/.seal_gen/cache/`
