@@ -229,15 +229,40 @@ class CalligraphyScraper:
                         f"首选{priority[0]}中部分字缺失，全部统一使用{font_style}"
                     )
 
-                # ── Try unified source (同源同体) ────────────
-                unified = self._try_unified_source(text, font_style)
+                # ── Try source unification (同源同体) ────────
+                # Fetch all candidates per char (bypasses single-image cache)
+                all_cands = {
+                    char: self._fetch_all_candidates(char, font_style)
+                    for char in text
+                }
+
+                # Level 1: fully unified source
+                unified = self._try_unified_source_from_candidates(
+                    text, font_style, all_cands
+                )
                 if unified is not None:
                     u_images, u_tabs, u_srcs, u_source = unified
                     logger.info("统一来源: %s (%d字)", u_source, len(text))
                     warnings.append(f"统一来源: {u_source}")
                     return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
 
-                # No unified source — use per-char best (existing behavior)
+                # Level 2: majority source (covers most chars)
+                maj = self._majority_source_fallback(text, all_cands)
+                if maj is not None:
+                    m_images, m_tabs, m_srcs, m_source, fb_chars = maj
+                    logger.info(
+                        "多数来源: %s (%d/%d字)",
+                        m_source, len(text) - len(fb_chars), len(text),
+                    )
+                    if fb_chars:
+                        warnings.append(
+                            f"主来源 {m_source}，「{'」「'.join(fb_chars)}」使用次优来源"
+                        )
+                    else:
+                        warnings.append(f"统一来源: {m_source}")
+                    return m_images, font_style, idx > 0, m_tabs, m_srcs, warnings
+
+                # Level 3: per-char best (original behavior)
                 unique_sources = list(dict.fromkeys(src_names))
                 if len(unique_sources) > 1:
                     warnings.append(
@@ -304,29 +329,26 @@ class CalligraphyScraper:
 
     # ── unified source selection ────────────────────────────
 
-    def _try_unified_source(
-        self, text: str, font_style: str
+    def _try_unified_source_from_candidates(
+        self,
+        text: str,
+        font_style: str,
+        all_cands: dict[str, list[tuple[Image.Image, float, str, str]]],
     ) -> Optional[tuple[list[Image.Image], list[str], list[str], str]]:
-        """
-        Try to find a single source that covers ALL characters.
-
-        Returns (images, tabs, source_names, unified_source_name) or None.
-        """
-        # Collect all candidates per character
-        char_candidates: dict[str, dict[str, tuple[Image.Image, float, str]]] = {}
+        """Find a single source covering ALL characters. Returns tuple or None."""
+        # Group by source per character
+        char_by_source: dict[str, dict[str, tuple[Image.Image, float, str]]] = {}
         for char in text:
-            candidates = self._fetch_all_candidates(char, font_style)
-            if not candidates:
+            by_src: dict[str, tuple[Image.Image, float, str]] = {}
+            for img, score, src, tab in all_cands.get(char, []):
+                if src not in by_src:
+                    by_src[src] = (img, score, tab)
+            if not by_src:
                 return None
-            # Group by source: {source_name: (img, score, tab)}
-            by_source: dict[str, tuple[Image.Image, float, str]] = {}
-            for img, score, src, tab in candidates:
-                if src not in by_source:
-                    by_source[src] = (img, score, tab)
-            char_candidates[char] = by_source
+            char_by_source[char] = by_src
 
-        # Find sources common to ALL characters
-        source_sets = [set(cs.keys()) for cs in char_candidates.values()]
+        # Intersection of sources across all characters
+        source_sets = [set(cs.keys()) for cs in char_by_source.values()]
         common = source_sets[0]
         for s in source_sets[1:]:
             common &= s
@@ -335,28 +357,79 @@ class CalligraphyScraper:
             logger.info("无统一来源 (字: %s)", ", ".join(text))
             return None
 
-        # Pick common source with highest average score
-        best_source = ""
-        best_avg = -1.0
-        for src in common:
-            avg = sum(char_candidates[c][src][1] for c in text) / len(text)
-            if avg > best_avg:
-                best_avg = avg
-                best_source = src
+        # Best common source by average score
+        best_source = max(
+            common,
+            key=lambda src: sum(char_by_source[c][src][1] for c in text) / len(text),
+        )
 
-        # Assemble result from the unified source
-        images: list[Image.Image] = []
-        tabs: list[str] = []
-        src_names: list[str] = []
+        images, tabs_, src_names = [], [], []
         for char in text:
-            img, score, tab = char_candidates[char][best_source]
+            img, score, tab = char_by_source[char][best_source]
             images.append(img)
-            tabs.append(tab)
+            tabs_.append(tab)
             src_names.append(best_source)
-            # Cache the unified-source image
             self._save_cache(char, font_style, tab, img, best_source)
 
-        return images, tabs, src_names, best_source
+        return images, tabs_, src_names, best_source
+
+    def _majority_source_fallback(
+        self,
+        text: str,
+        all_cands: dict[str, list[tuple[Image.Image, float, str, str]]],
+    ) -> Optional[tuple[list[Image.Image], list[str], list[str], str, list[str]]]:
+        """
+        Pick the source covering the most characters (majority vote).
+        Tie-break by average score. Returns (images, tabs, src_names, source, fallback_chars).
+        """
+        # Build coverage map: {source: [(char, score, img, tab), ...]}
+        source_cov: dict[str, list[tuple[str, float, Image.Image, str]]] = {}
+        for char in text:
+            seen: set[str] = set()
+            for img, score, src, tab in all_cands.get(char, []):
+                if src not in seen:
+                    source_cov.setdefault(src, []).append((char, score, img, tab))
+                    seen.add(src)
+
+        if not source_cov:
+            return None
+
+        # Rank: coverage count first, average score second
+        def _rank(src: str) -> tuple[int, float]:
+            entries = source_cov[src]
+            return (len({c for c, *_ in entries}), sum(s for _, s, *_ in entries) / len(entries))
+
+        majority_src = max(source_cov, key=_rank)
+        covered = {c: (img, tab) for c, _, img, tab in source_cov[majority_src]}
+
+        logger.info(
+            "多数来源: %s 覆盖 %d/%d 字",
+            majority_src, len(covered), len(text),
+        )
+
+        images, tabs_, src_names, fb_chars = [], [], [], []
+        for char in text:
+            if char in covered:
+                img, tab = covered[char]
+                images.append(img)
+                tabs_.append(tab)
+                src_names.append(majority_src)
+            else:
+                # Fallback: best available from any source
+                cands = all_cands.get(char, [])
+                if cands:
+                    img, _, src, tab = cands[0]
+                    images.append(img)
+                    tabs_.append(tab)
+                    src_names.append(src)
+                else:
+                    images.append(self._render_local_fallback(char))
+                    tabs_.append("本地")
+                    src_names.append("")
+                fb_chars.append(char)
+                logger.warning("主来源 %s 无「%s」, 回退次优", majority_src, char)
+
+        return images, tabs_, src_names, majority_src, fb_chars
 
     # ── cache-then-web helper ───────────────────────────────
 
@@ -494,7 +567,8 @@ class CalligraphyScraper:
                     continue
                 scored = self._download_scored_candidates(glyph_list)
                 for img, score, src in scored:
-                    all_candidates.append((img, score, src, tab_name))
+                    if score > 0:  # skip hard-rejected (fragmented) images
+                        all_candidates.append((img, score, src, tab_name))
 
             if all_candidates:
                 break  # Found in original char, don't try traditional
@@ -571,20 +645,49 @@ class CalligraphyScraper:
         """
         Score a candidate image (0–100).
 
-          Resolution  (0–30): short-side relative to 600px
-          Contrast    (0–50): grayscale std relative to 120
-          Coverage    (0–20): minority-color ratio in 15%–60%
-          Alpha penalty: multi-fragment RGBA images penalized
-          Yinpu penalty: known 印谱 sources get base -10
+          Resolution  (0–30) + Contrast (0–50) + Coverage (0–20)
+          - 印谱 base penalty (-10)
+          - Physical fragmentation: hard reject (return 0)
+            Only triggers when largest opaque block > 15% of image area
+            (prevents 「八」「川」false kills — their strokes are < 5%)
         """
         gray = np.array(img.convert("L"), dtype=np.float64)
         short_side = min(img.width, img.height)
 
         res_score = min(short_side / 600.0, 1.0) * 30.0
+        contrast_score = min(float(np.std(gray)) / 120.0, 1.0) * 50.0
 
-        std = float(np.std(gray))
-        contrast_score = min(std / 120.0, 1.0) * 50.0
+        # ── Physical fragmentation hard reject ───────────────
+        if img.mode in ("RGBA", "LA"):
+            alpha_arr = np.array(img.split()[-1])
+            fully_transparent = float((alpha_arr < 10).sum()) / alpha_arr.size
 
+            if fully_transparent > 0.05:
+                opaque = (alpha_arr >= 128).astype(np.uint8)
+                n_labels, _, cc_stats, _ = cv2.connectedComponentsWithStats(
+                    opaque, connectivity=8
+                )
+                if n_labels > 1:
+                    cc_max = int(cc_stats[1:, cv2.CC_STAT_AREA].max())
+                    total_area = img.width * img.height
+
+                    # Gate: only if largest block > 15% of image
+                    # (印谱 stone = 40-70%, normal strokes = 2-8%)
+                    if cc_max > total_area * 0.15:
+                        major_blocks = sum(
+                            1
+                            for j in range(1, n_labels)
+                            if cc_stats[j, cv2.CC_STAT_AREA] > cc_max * 0.15
+                        )
+                        if major_blocks >= 2:
+                            logger.warning(
+                                "物理碎裂 %d 大块, 淘汰: src=%s",
+                                major_blocks,
+                                source_name,
+                            )
+                            return 0.0
+
+        # ── Coverage ─────────────────────────────────────────
         binary = gray < 128
         coverage = float(binary.mean())
         coverage = min(coverage, 1.0 - coverage)
@@ -596,36 +699,15 @@ class CalligraphyScraper:
         else:
             coverage_score = max(0.0, (1.0 - coverage) / 0.40) * 20.0
 
-        base_score = res_score + contrast_score + coverage_score
-
-        # ── Alpha structure penalty ──────────────────────────
-        alpha_penalty = 0.0
-        if img.mode == "RGBA":
-            alpha_arr = np.array(img.split()[3])
-            opaque_mask = (alpha_arr >= 128).astype(np.uint8)
-
-            if opaque_mask.any():
-                n_labels, _, cc_stats, _ = cv2.connectedComponentsWithStats(
-                    opaque_mask, connectivity=8
-                )
-                if n_labels > 1:
-                    cc_max = int(cc_stats[1:, cv2.CC_STAT_AREA].max())
-                    fragment_count = sum(
-                        1
-                        for j in range(1, n_labels)
-                        if cc_stats[j, cv2.CC_STAT_AREA] > cc_max * 0.05
-                    )
-                    if fragment_count == 2:
-                        alpha_penalty = 30.0
-                    elif fragment_count >= 3:
-                        alpha_penalty = 50.0
+        base = res_score + contrast_score + coverage_score
 
         # ── Known 印谱 source base penalty ───────────────────
         from .extractor import KNOWN_YINPU_SOURCES
 
-        yinpu_penalty = 10.0 if source_name in KNOWN_YINPU_SOURCES else 0.0
+        if source_name in KNOWN_YINPU_SOURCES:
+            base = max(0.0, base - 10.0)
 
-        return max(0.0, base_score - alpha_penalty - yinpu_penalty)
+        return base
 
     # ── local fallback ───────────────────────────────────────
 
