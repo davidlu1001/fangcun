@@ -71,10 +71,7 @@ class CharExtractor:
         else:
             binary = self._binarize_otsu(gray)
 
-        # Step 2.5: remove seal frame lines for 印谱 sources
-        is_yinpu = source_name in KNOWN_YINPU_SOURCES or self._detected_as_yinpu
-        if is_yinpu:
-            binary = self._remove_seal_frame(binary)
+        # (印框剥离已在 _extract_yinpu_strokes 阶段2 完成，无需额外步骤)
 
         # Step 3: quality check (absolute pixel count, not percentage)
         stroke_pixels = int(np.count_nonzero(binary))
@@ -186,12 +183,19 @@ class CharExtractor:
     @staticmethod
     def _extract_yinpu_strokes(img: Image.Image) -> np.ndarray:
         """
-        印谱专用提取：笔画 = 不透明 bbox 内的透明孔洞。
+        印谱字形提取：两阶段终极算法。
 
-        1. 找到所有不透明像素 (α>128) 的 bounding box
-        2. bbox 内：α<128 → 笔画槽 → 黑 (0)
-        3. bbox 内：α>128 → 印面 → 白 (255)
-        4. bbox 外（透明外边距）→ 白 (255)，不参与笔画识别
+        阶段1 — 聚合 Alpha CCA：
+          找到最大不透明连通块（石面主体），聚合周围大型碎块，
+          得到印章真实石面的联合 Bounding Box。
+          - 面积 > 最大块 5%（过滤噪点）
+          - 中心距 < 主块短边 2 倍（过滤远处页面边框）
+
+        阶段2 — CCA bbox 内边缘内缩：
+          从联合 bbox 各边缘向内逐行扫描 alpha，
+          找到首个"不透明占比 >= 50%"的行 = 石面开始，
+          该行之前的透明通道 = 印框刻槽，安全剥离。
+          替代了所有版本的 _remove_seal_frame。
         """
         if img.mode not in ("RGBA", "LA"):
             bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -199,22 +203,101 @@ class CharExtractor:
             return 255 - np.array(bg.convert("L"))
 
         alpha = np.array(img.split()[-1])
-        opaque = alpha > 128
+        opaque = (alpha >= 128).astype(np.uint8)
 
-        coords = np.argwhere(opaque)
-        if coords.size == 0:
+        # ── 阶段1: 聚合 Alpha CCA ───────────────────────────
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            opaque, connectivity=8
+        )
+
+        if num_labels <= 1:
             bg = Image.new("RGB", img.size, (255, 255, 255))
             bg.paste(img, mask=img.split()[-1])
             return np.array(bg.convert("L"))
 
-        y0, x0 = coords.min(axis=0)
-        y1, x1 = coords.max(axis=0)
+        largest_label = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+        max_area = int(stats[largest_label, cv2.CC_STAT_AREA])
 
+        largest_cx = stats[largest_label, cv2.CC_STAT_LEFT] + stats[largest_label, cv2.CC_STAT_WIDTH] / 2.0
+        largest_cy = stats[largest_label, cv2.CC_STAT_TOP] + stats[largest_label, cv2.CC_STAT_HEIGHT] / 2.0
+        ref_dim = min(
+            int(stats[largest_label, cv2.CC_STAT_WIDTH]),
+            int(stats[largest_label, cv2.CC_STAT_HEIGHT]),
+        )
+
+        min_x, min_y = int(alpha.shape[1]), int(alpha.shape[0])
+        max_x, max_y = 0, 0
+        valid_chunks = 0
+
+        for i in range(1, num_labels):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if area <= max_area * 0.05:
+                continue
+
+            cx = stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH] / 2.0
+            cy = stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] / 2.0
+            if abs(cx - largest_cx) >= ref_dim * 2.0 or abs(cy - largest_cy) >= ref_dim * 2.0:
+                continue
+
+            min_x = min(min_x, int(stats[i, cv2.CC_STAT_LEFT]))
+            min_y = min(min_y, int(stats[i, cv2.CC_STAT_TOP]))
+            max_x = max(max_x, int(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH] - 1))
+            max_y = max(max_y, int(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] - 1))
+            valid_chunks += 1
+
+        if valid_chunks == 0:
+            min_x = int(stats[largest_label, cv2.CC_STAT_LEFT])
+            min_y = int(stats[largest_label, cv2.CC_STAT_TOP])
+            max_x = min_x + int(stats[largest_label, cv2.CC_STAT_WIDTH]) - 1
+            max_y = min_y + int(stats[largest_label, cv2.CC_STAT_HEIGHT]) - 1
+            valid_chunks = 1
+
+        by0, bx0, by1, bx1 = min_y, min_x, max_y, max_x
+        bh = by1 - by0 + 1
+        bw = bx1 - bx0 + 1
+
+        logger.info(
+            "Alpha CCA 阶段1: 聚合 %d 石面碎块, bbox=%dx%d @(%d,%d)",
+            valid_chunks, bw, bh, bx0, by0,
+        )
+
+        # ── 阶段2: CCA bbox 内边缘扫描，剥离印框 ────────────
+        bbox_alpha = alpha[by0 : by1 + 1, bx0 : bx1 + 1]
+        max_scan = max(5, int(min(bh, bw) * 0.15))
+
+        def scan_frame_thickness(strips: np.ndarray) -> int:
+            for t in range(min(max_scan, len(strips))):
+                if (strips[t] >= 128).mean() >= 0.50:
+                    return max(t, 1)
+            return max_scan
+
+        mt = scan_frame_thickness(bbox_alpha)
+        mb = scan_frame_thickness(bbox_alpha[::-1])
+        ml = scan_frame_thickness(bbox_alpha.T)
+        mr = scan_frame_thickness(bbox_alpha[:, ::-1].T)
+
+        iy0 = by0 + mt + 1
+        iy1 = by1 - mb - 1
+        ix0 = bx0 + ml + 1
+        ix1 = bx1 - mr - 1
+
+        if iy0 >= iy1 or ix0 >= ix1:
+            logger.warning(
+                "内缩过度 (mt=%d mb=%d ml=%d mr=%d), 回退到 CCA bbox",
+                mt, mb, ml, mr,
+            )
+            iy0, iy1, ix0, ix1 = by0, by1, bx0, bx1
+
+        logger.info(
+            "Alpha CCA 阶段2: 印框剥离 top=%d bot=%d left=%d right=%d → 提取区 %dx%d",
+            mt, mb, ml, mr, ix1 - ix0 + 1, iy1 - iy0 + 1,
+        )
+
+        # ── 提取字形刻槽 → 白底黑字 ─────────────────────────
         gray = np.full(alpha.shape, 255, dtype=np.uint8)
-
-        bbox_alpha = alpha[y0 : y1 + 1, x0 : x1 + 1]
-        gray[y0 : y1 + 1, x0 : x1 + 1] = np.where(
-            bbox_alpha < 128, 0, 255
+        inner_alpha = alpha[iy0 : iy1 + 1, ix0 : ix1 + 1]
+        gray[iy0 : iy1 + 1, ix0 : ix1 + 1] = np.where(
+            inner_alpha < 128, 0, 255
         ).astype(np.uint8)
 
         return gray
