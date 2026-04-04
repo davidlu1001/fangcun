@@ -1,5 +1,5 @@
 """
-极客禅 · 印章生成器 — Gradio Web UI (主入口)
+方寸 · 极客禅印章生成器 — Gradio Web UI (主入口)
 
 Usage:
     python app.py
@@ -95,9 +95,9 @@ def generate_seal(
 
 # ── Gradio UI ────────────────────────────────────────────────
 
-with gr.Blocks(title="极客禅 · 印章生成器") as demo:
+with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft()) as demo:
 
-    gr.Markdown("# 🖋 极客禅 · 印章生成器")
+    gr.Markdown("# 🖋 方寸 · 极客禅印章生成器\n*Fangcun — Chinese Seal Generator for Geek-Zen*")
 
     with gr.Row():
         # ── Left panel: parameters ───────────────────────────
@@ -208,4 +208,4 @@ with gr.Blocks(title="极客禅 · 印章生成器") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", theme=gr.themes.Soft())
+    demo.launch(server_name="0.0.0.0")

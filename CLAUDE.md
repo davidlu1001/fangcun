@@ -1,6 +1,6 @@
-# fangcun (方寸)
+# 方寸 · 极客禅印章生成器
 
-A Geek-Zen seal generator. 数字化传统金石艺术，代码刻出的方寸之美。
+Fangcun — Chinese Seal Generator for Geek-Zen. 数字化传统金石艺术，代码刻出的方寸之美。
 
 ## Architecture
 
