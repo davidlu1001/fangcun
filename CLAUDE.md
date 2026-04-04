@@ -36,10 +36,13 @@ Level 5: 各字独立最优     per-char best (last resort)
 - Inferior style penalty: -25 (金文/简帛 sources unsuitable for seal carving)
 - `KNOWN_YINPU_SOURCES` and `INFERIOR_STYLE_SOURCES` sets in extractor/scraper
 
+**Deferred state machine**: prefers lower-priority font with unified source over higher-priority font with mixed sources (隶書同源 > 篆書異源). When a font covers all chars but no unified source exists, saves a fallback and continues to the next font instead of returning immediately.
+
 **Other scraper decisions**:
 - Tab priority: 字典 (type=3) → 真迹 (type=2), never 字库 (type=1)
 - Font consistency: all chars must share same script. 闲章: 篆→隶→楷; 名章: 隶→楷
 - Simplified→traditional: opencc auto-tries 蘇 when 苏 fails
+- Atomic cache writes (tempfile + os.replace)
 - AES-ECB encrypted API. Protocol in `scraper.py` header.
 
 ## Extractor: Three-tier polarity + two-phase 印谱 extraction
@@ -63,6 +66,12 @@ Phase 2 — Edge inset per chunk:
 - Only transparent holes (α<128) within inset region become strokes
 
 **Binarization**: Otsu for 字典/本地; bilateral filter + adaptive for 真迹. Never adaptive with small block on clean images (hollow outlines).
+
+## Aesthetic decisions
+
+- **Texture**: block-shaped stone chipping via low-frequency Gaussian-smoothed noise (not salt noise or cubic interpolation which causes ringing). Physically models stone fracture along cleavage planes.
+- **Layout margin**: 0.10 (tightened from 0.15). Fuller seal appearance without stroke-frame collision. Equal-ratio scaling only — no vertical stretch (preserves 小篆 stroke-width uniformity).
+- **Renderer**: solid fill via mask paste (never `drawContours` which produces hollow outlines).
 
 ## Data Flow
 
@@ -100,5 +109,7 @@ python cli.py --batch chars.txt --output-dir ./seals/
 ## Conventions
 
 - Inversion/normalization ONLY in extractor, never scraper
-- Cache: `~/.seal_gen/cache/{char}_{font}_{tab}.png` + `.src` metadata
+- Cache: `~/.seal_gen/cache/{char}_{font}_{tab}.png` + `.src` metadata (atomic writes)
 - Local font fallback: serif preferred (思源宋体 > 黑体)
+- No vertical stretch of characters (preserves 小篆 stroke uniformity)
+- 留红即设计: single-char-per-column whitespace is intentional (traditional 章法)
