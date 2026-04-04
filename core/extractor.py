@@ -4,6 +4,7 @@ Character glyph extraction: raw calligraphy image → clean binary mask.
 Pipeline:
   1. _normalize_to_black_on_white()  — three-tier polarity defense
   2. Otsu / adaptive binarization (source-aware)
+  2.5 _remove_seal_frame()          — for 印谱 sources only
   3. Morphological denoising
   4. Bounding box crop
   5. Quality validation (absolute pixel count for simple chars like 一)
@@ -41,6 +42,9 @@ KNOWN_YINPU_SOURCES = frozenset({
 class CharExtractor:
     """Extract a clean stroke mask from a raw calligraphy image."""
 
+    def __init__(self) -> None:
+        self._detected_as_yinpu = False
+
     def extract(
         self, img: Image.Image, source: str = "字典", source_name: str = ""
     ) -> Image.Image:
@@ -53,6 +57,8 @@ class CharExtractor:
         Returns:
             mode "L" mask cropped to bounding box. 255 = stroke, 0 = background.
         """
+        self._detected_as_yinpu = False
+
         # Step 1: normalize polarity (three-tier defense)
         gray = self._normalize_to_black_on_white(img, source_name)
 
@@ -64,6 +70,11 @@ class CharExtractor:
             binary = self._binarize_adaptive(gray, block_size=block, c=10)
         else:
             binary = self._binarize_otsu(gray)
+
+        # Step 2.5: remove seal frame lines for 印谱 sources
+        is_yinpu = source_name in KNOWN_YINPU_SOURCES or self._detected_as_yinpu
+        if is_yinpu:
+            binary = self._remove_seal_frame(binary)
 
         # Step 3: quality check (absolute pixel count, not percentage)
         stroke_pixels = int(np.count_nonzero(binary))
@@ -93,7 +104,7 @@ class CharExtractor:
 
         Three-tier defense (performance: O(1) → O(N) → O(N)):
 
-        Tier 1: Known 印谱 source whitelist — O(1), direct invert
+        Tier 1: Known 印谱 source whitelist — O(1), alpha hole extraction
         Tier 2: Alpha semantic detection — check bright-pixel ratio
                  in opaque region (印谱 has white stroke slots in black block)
         Tier 3: Morphological erosion fallback — erode black areas;
@@ -101,7 +112,8 @@ class CharExtractor:
         """
         # ── Tier 1: whitelist ────────────────────────────────
         if source_name in KNOWN_YINPU_SOURCES:
-            logger.info("Tier 1: known 印谱 source '%s', extracting via alpha", source_name)
+            logger.info("Tier 1: 印谱白名单 '%s', alpha孔洞提取", source_name)
+            self._detected_as_yinpu = True
             return self._extract_yinpu_strokes(img)
 
         gray = self._composite_to_gray(img)
@@ -110,7 +122,6 @@ class CharExtractor:
         if img.mode in ("RGBA", "LA"):
             alpha = np.array(img.split()[-1])
 
-            # Guard against fake transparency (e.g. convert('RGBA') on opaque)
             fully_transparent_ratio = float((alpha < 10).sum()) / alpha.size
 
             if fully_transparent_ratio > 0.08:
@@ -123,9 +134,10 @@ class CharExtractor:
 
                     if light_ratio > 0.15:
                         logger.info(
-                            "Tier 2: opaque region has %.1f%% bright pixels → 印谱, extracting via alpha",
-                            light_ratio * 100,
+                            "Tier 2: 印谱结构检测 light_ratio=%.2f, alpha孔洞提取",
+                            light_ratio,
                         )
+                        self._detected_as_yinpu = True
                         return self._extract_yinpu_strokes(img)
 
                     if light_ratio < 0.05:
@@ -152,8 +164,6 @@ class CharExtractor:
             cropped, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
         )
 
-        # Use max(w,h) so extreme aspect ratios (一: 100×20) still work:
-        # min=20 → k=3 can't erode 20px stroke; max=100 → k=12 can.
         k = max(5, int(max(w, h) * 0.12))
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
         eroded = cv2.erode(binary_inv, kernel)
@@ -176,16 +186,14 @@ class CharExtractor:
     @staticmethod
     def _extract_yinpu_strokes(img: Image.Image) -> np.ndarray:
         """
-        For 印谱 images: strokes are transparent holes within an opaque block.
+        印谱专用提取：笔画 = 不透明 bbox 内的透明孔洞。
 
-        The opaque area (α>128) is the seal surface (background).
-        Transparent holes (α<128) INSIDE the opaque bbox are carved stroke channels.
-        Transparent area OUTSIDE the bbox is padding (not strokes).
-
-        Returns: white-bg + black-strokes grayscale, ready for Otsu.
+        1. 找到所有不透明像素 (α>128) 的 bounding box
+        2. bbox 内：α<128 → 笔画槽 → 黑 (0)
+        3. bbox 内：α>128 → 印面 → 白 (255)
+        4. bbox 外（透明外边距）→ 白 (255)，不参与笔画识别
         """
         if img.mode not in ("RGBA", "LA"):
-            # No alpha → fall back to composite-and-invert
             bg = Image.new("RGB", img.size, (255, 255, 255))
             bg.paste(img)
             return 255 - np.array(bg.convert("L"))
@@ -202,16 +210,81 @@ class CharExtractor:
         y0, x0 = coords.min(axis=0)
         y1, x1 = coords.max(axis=0)
 
-        # White background everywhere
         gray = np.full(alpha.shape, 255, dtype=np.uint8)
 
-        # Within opaque bbox: transparent pixels = strokes → black
         bbox_alpha = alpha[y0 : y1 + 1, x0 : x1 + 1]
         gray[y0 : y1 + 1, x0 : x1 + 1] = np.where(
             bbox_alpha < 128, 0, 255
         ).astype(np.uint8)
 
         return gray
+
+    # ── Seal frame removal ───────────────────────────────────
+
+    @staticmethod
+    def _remove_seal_frame(binary: np.ndarray) -> np.ndarray:
+        """
+        Remove rectangular seal frame lines from 印谱 binary mask.
+        Handles both complete hollow frames and broken frame segments.
+
+        Three-layer detection:
+          1. Hollow box: bbox_coverage > 30% AND fill_ratio < 35%
+          2. Frame line segment: aspect > 6 AND spans > 55% of image dimension
+             AND centroid > 30% from center AND area < 2.5% of image
+          3. Small noise (< 0.1%): skipped silently
+
+        Protection for 「一」: a horizontal stroke has its centroid near image
+        center (center_dist ≈ 0%), well within the 30% exclusion zone.
+        """
+        h, w = binary.shape
+        img_area = h * w
+        cx_img, cy_img = w / 2.0, h / 2.0
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
+        )
+        result = binary.copy()
+
+        for i in range(1, num_labels):
+            bx, by, bw, bh, area = stats[i]
+            bbox_area = max(bw * bh, 1)
+            fill_ratio = area / bbox_area
+            bbox_cov = bbox_area / img_area
+            aspect = max(bw, bh) / max(min(bw, bh), 1)
+
+            # Skip tiny noise
+            if area < img_area * 0.001:
+                continue
+
+            # Detection 1: complete hollow frame
+            is_hollow_box = bbox_cov > 0.30 and fill_ratio < 0.35
+
+            # Detection 2: broken frame line segment
+            spans_major = bw > w * 0.55 or bh > h * 0.55
+            is_long_thin = aspect > 6 and spans_major
+
+            is_frame_line = False
+            if is_long_thin:
+                centroid_x = bx + bw / 2.0
+                centroid_y = by + bh / 2.0
+                if bw >= bh:
+                    center_dist = abs(centroid_y - cy_img) / h
+                else:
+                    center_dist = abs(centroid_x - cx_img) / w
+
+                is_peripheral = center_dist > 0.30
+                is_thin_enough = area < img_area * 0.025
+                is_frame_line = is_peripheral and is_thin_enough
+
+            if is_hollow_box or is_frame_line:
+                logger.info(
+                    "移除印框 #%d: %dx%d fill=%.2f asp=%.1f cov=%.3f → %s",
+                    i, bw, bh, fill_ratio, aspect, bbox_cov,
+                    "hollow_box" if is_hollow_box else "frame_line",
+                )
+                result[labels == i] = 0
+
+        return result
 
     # ── Compositing helpers ──────────────────────────────────
 
@@ -224,16 +297,6 @@ class CharExtractor:
         else:
             bg.paste(img)
         return np.array(bg.convert("L"))
-
-    @staticmethod
-    def _composite_and_invert(img: Image.Image) -> np.ndarray:
-        """Composite onto white → grayscale → invert."""
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        if img.mode in ("RGBA", "LA"):
-            bg.paste(img, mask=img.split()[-1])
-        else:
-            bg.paste(img)
-        return 255 - np.array(bg.convert("L"))
 
     # ── Binarization ─────────────────────────────────────────
 
