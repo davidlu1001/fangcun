@@ -230,7 +230,7 @@ class CalligraphyScraper:
                     )
 
                 # ── Try source unification (同源同体) ────────
-                # Fetch all candidates per char (bypasses single-image cache)
+                # Round 1: n=5 candidates per char
                 all_cands = {
                     char: self._fetch_all_candidates(char, font_style)
                     for char in text
@@ -246,8 +246,24 @@ class CalligraphyScraper:
                     warnings.append(f"统一来源: {u_source}")
                     return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
 
-                # Level 2: majority source (covers most chars)
-                maj = self._majority_source_fallback(text, all_cands)
+                # Round 2: widen pool to n=10 and retry
+                logger.info("n=5 无统一来源, 扩大至 n=10 重试")
+                all_cands_wide = {
+                    char: self._fetch_all_candidates(char, font_style, n=10)
+                    for char in text
+                }
+
+                unified = self._try_unified_source_from_candidates(
+                    text, font_style, all_cands_wide
+                )
+                if unified is not None:
+                    u_images, u_tabs, u_srcs, u_source = unified
+                    logger.info("统一来源(wide): %s (%d字)", u_source, len(text))
+                    warnings.append(f"统一来源: {u_source}")
+                    return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
+
+                # Level 2: majority source from wide pool
+                maj = self._majority_source_fallback(text, all_cands_wide)
                 if maj is not None:
                     m_images, m_tabs, m_srcs, m_source, fb_chars = maj
                     logger.info(
@@ -262,7 +278,19 @@ class CalligraphyScraper:
                         warnings.append(f"统一来源: {m_source}")
                     return m_images, font_style, idx > 0, m_tabs, m_srcs, warnings
 
-                # Level 3: per-char best (original behavior)
+                # Level 3: minimum style loss fallback
+                msl = self._min_style_loss_fallback(text, all_cands_wide)
+                if msl is not None:
+                    s_images, s_tabs, s_srcs, s_source, s_fb = msl
+                    if s_fb:
+                        warnings.append(
+                            f"最小损失来源 {s_source}，「{'」「'.join(s_fb)}」使用次优"
+                        )
+                    else:
+                        warnings.append(f"统一来源: {s_source}")
+                    return s_images, font_style, idx > 0, s_tabs, s_srcs, warnings
+
+                # Level 4: per-char best (last resort)
                 unique_sources = list(dict.fromkeys(src_names))
                 if len(unique_sources) > 1:
                     warnings.append(
@@ -402,10 +430,10 @@ class CalligraphyScraper:
         majority_src = max(source_cov, key=_rank)
         covered = {c: (img, tab) for c, _, img, tab in source_cov[majority_src]}
 
-        # If majority source covers at most half the chars, don't force unification
+        # If majority source covers at most half, defer to min-style-loss
         if len(covered) <= len(text) // 2:
             logger.warning(
-                "多数来源 %s 覆盖率不足 50%% (%d/%d), 退化各字独立最优",
+                "多数来源 %s 覆盖率不足 50%% (%d/%d), 退化至最小损失",
                 majority_src, len(covered), len(text),
             )
             return None
@@ -438,6 +466,81 @@ class CalligraphyScraper:
                 logger.warning("主来源 %s 无「%s」, 回退次优", majority_src, char)
 
         return images, tabs_, src_names, majority_src, fb_chars
+
+    # ── minimum style loss fallback ─────────────────────────
+
+    def _min_style_loss_fallback(
+        self,
+        text: str,
+        all_cands: dict[str, list[tuple[Image.Image, float, str, str]]],
+    ) -> Optional[tuple[list[Image.Image], list[str], list[str], str, list[str]]]:
+        """
+        When no source covers >50%: find the source with minimum total
+        score loss compared to per-char best. Prioritizes coverage count,
+        then minimizes quality sacrifice.
+
+        Ranking: coverage_count × 100 − total_score_loss
+        """
+        # Build per-source stats
+        source_info: dict[str, dict] = {}  # {src: {chars: {char: (img, score, tab)}}}
+
+        for char in text:
+            seen: set[str] = set()
+            for img, score, src, tab in all_cands.get(char, []):
+                if src not in seen:
+                    if src not in source_info:
+                        source_info[src] = {"chars": {}}
+                    source_info[src]["chars"][char] = (img, score, tab)
+                    seen.add(src)
+
+        if not source_info:
+            return None
+
+        # Per-char best scores for loss calculation
+        best_scores = {}
+        for char in text:
+            cands = all_cands.get(char, [])
+            best_scores[char] = cands[0][1] if cands else 0.0
+
+        # Rank sources: coverage × 100 − total loss
+        def _rank(src: str) -> float:
+            chars_map = source_info[src]["chars"]
+            coverage = len(chars_map)
+            total_loss = sum(
+                best_scores[c] - chars_map[c][1]
+                for c in chars_map
+            )
+            return coverage * 100.0 - total_loss
+
+        best_src = max(source_info, key=_rank)
+        covered_chars = source_info[best_src]["chars"]
+
+        logger.info(
+            "最小损失来源: %s 覆盖 %d/%d 字",
+            best_src, len(covered_chars), len(text),
+        )
+
+        images, tabs_, src_names, fb_chars = [], [], [], []
+        for char in text:
+            if char in covered_chars:
+                img, score, tab = covered_chars[char]
+                images.append(img)
+                tabs_.append(tab)
+                src_names.append(best_src)
+            else:
+                cands = all_cands.get(char, [])
+                if cands:
+                    img, _, src, tab = cands[0]
+                    images.append(img)
+                    tabs_.append(tab)
+                    src_names.append(src)
+                else:
+                    images.append(self._render_local_fallback(char))
+                    tabs_.append("本地")
+                    src_names.append("")
+                fb_chars.append(char)
+
+        return images, tabs_, src_names, best_src, fb_chars
 
     # ── cache-then-web helper ───────────────────────────────
 
@@ -553,10 +656,10 @@ class CalligraphyScraper:
         return self._download_best_image(glyph_list)
 
     def _fetch_all_candidates(
-        self, char: str, font_style: str
+        self, char: str, font_style: str, n: int = 5
     ) -> list[tuple[Image.Image, float, str, str]]:
         """
-        Fetch ALL scored candidates for a char across tabs.
+        Fetch up to n scored candidates for a char across tabs.
         Returns [(img, score, source_name, tab), ...] sorted by score desc.
         Used for unified source selection.
         """
@@ -573,13 +676,13 @@ class CalligraphyScraper:
                 glyph_list = self._query_glyph_list(try_char, font_style, tab_type)
                 if not glyph_list:
                     continue
-                scored = self._download_scored_candidates(glyph_list)
+                scored = self._download_scored_candidates(glyph_list, max_n=n)
                 for img, score, src in scored:
-                    if score > 0:  # skip hard-rejected (fragmented) images
+                    if score > 0:
                         all_candidates.append((img, score, src, tab_name))
 
             if all_candidates:
-                break  # Found in original char, don't try traditional
+                break
 
         all_candidates.sort(key=lambda c: c[1], reverse=True)
         return all_candidates
@@ -590,13 +693,13 @@ class CalligraphyScraper:
     _MIN_RESOLUTION = 150
 
     def _download_scored_candidates(
-        self, glyph_list: list[dict]
+        self, glyph_list: list[dict], max_n: int = 5
     ) -> list[tuple[Image.Image, float, str]]:
-        """Download up to 5 candidates, score each. Returns [(img, score, source_name), ...]."""
+        """Download up to max_n candidates, score each. Returns [(img, score, source_name), ...]."""
         candidates: list[tuple[Image.Image, float, str]] = []
 
         for glyph in glyph_list:
-            if len(candidates) >= self._MAX_CANDIDATES:
+            if len(candidates) >= max_n:
                 break
 
             img_url = glyph.get("_clear_image", "")
