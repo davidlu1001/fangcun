@@ -92,11 +92,18 @@ class SealLayout:
             cells.append((cell_x, cell_y, cell_w, cell_h))
 
             mask = char_imgs[i]
+            logger.debug(
+                "[R9-P1] char[%d] src=%dx%d cell=(%d,%d,%dx%d)",
+                i, mask.size[0], mask.size[1], cell_x, cell_y, cell_w, cell_h,
+            )
             if style == "zhuwen":
                 bleed = int(min(cell_w, cell_h) * 0.04)
                 fitted = self._fit_to_cell(mask, cell_w + bleed, cell_h + bleed, margin=0.0)
             else:
                 fitted = self._fit_to_cell(mask, cell_w, cell_h, margin)
+            logger.debug(
+                "[R9-P1] char[%d] fitted=%dx%d", i, fitted.width, fitted.height,
+            )
             fitted_list.append(fitted)
 
         # ── Phase 1.5: 2-char fill balance ──────────────────
@@ -165,6 +172,17 @@ class SealLayout:
             dx, dy = self._centroid_offset(fitted)
             px = cell_x + (cell_w - fitted.width) // 2 - int(dx * 0.65)
             py = cell_y + (cell_h - fitted.height) // 2 - int(dy * 0.65)
+
+            overflow = (px < cell_x or py < cell_y
+                        or px + fitted.width > cell_x + cell_w
+                        or py + fitted.height > cell_y + cell_h)
+            logger.debug(
+                "[R9-P1] char[%d] placement=(%d,%d) final=%dx%d "
+                "cell_bounds=(%d,%d,%d,%d) centroid_dx=%d dy=%d %s",
+                i, px, py, fitted.width, fitted.height,
+                cell_x, cell_y, cell_x + cell_w, cell_y + cell_h,
+                dx, dy, "OVERFLOW!" if overflow else "ok",
+            )
 
             placements.append({
                 "img": fitted,

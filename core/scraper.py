@@ -340,6 +340,29 @@ class CalligraphyScraper:
         warnings: list[str] = []
         best_fallback = None  # "chars found but no unified source" backup
 
+        # ── R9-P0-1: single/repeated char short-circuit ────
+        # When all chars are the same (禅, 朝朝), "unified source" check
+        # is meaningless and introduces side-effects: Pass 2's wider pool
+        # can pick obscure sources (楚简名品, 许氏说文序) whose average
+        # score is inflated by having few candidates.
+        unique_chars = set(text)
+        if len(unique_chars) == 1:
+            char = text[0]
+            for font_style in priority:
+                img, tab, src = self._get_or_fetch(char, font_style)
+                if img is not None:
+                    images = [img] * len(text)
+                    tabs = [tab] * len(text)
+                    src_names = [src] * len(text)
+                    logger.info(
+                        "[R9] 单字/重字短路: text='%s' font=%s src=%s",
+                        text, font_style, src,
+                    )
+                    return self._log_final(
+                        text, (images, font_style, False, tabs, src_names, [])
+                    )
+            logger.warning("[R9] 单字/重字短路失败: '%s' 进入 Pass 2", text)
+
         for idx, font_style in enumerate(priority):
             # Step 1: verify font covers all chars (fast, uses cache)
             images: list[Image.Image] = []
@@ -1178,12 +1201,28 @@ class CalligraphyScraper:
             base = max(0.0, base - 10.0)
 
         # 金文/简帛 sources: archaic glyph forms unsuitable for seal carving
+        # R9-P0-2: archaic/obscure sources unsuitable for seal carving.
+        # Kept as -25 penalty (not hard-excluded) to preserve fallback for rare chars.
         _INFERIOR_STYLE_SOURCES = {
+            # 金文/简帛系
             "常用金文书法字典",
             "汉语古文字字形表",
             "睡虎地秦简文字编",
             "马王堆简帛",
             "马王堆帛书书法大字典",
+            "金文书法集萃",
+            "金文名品",
+            "甲骨文字典",
+            # 古奥偏门系
+            "楚简名品",
+            "许氏说文序",
+            "三坟记",
+            "说文解字真本",
+            "说文解字",
+            "说文部目",
+            "说文广义",
+            "篆书千字文",
+            "千字文",
         }
         if source_name in _INFERIOR_STYLE_SOURCES:
             base = max(0.0, base - 25.0)
