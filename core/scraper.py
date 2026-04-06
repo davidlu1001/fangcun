@@ -101,6 +101,24 @@ DECORATIVE_SOURCES: frozenset[str] = frozenset({
     "鸟虫篆全书",
 })
 
+# ── 主流汉印/印谱字源偏好（R10）────────────────────────
+# 单字/重字印章 tie-break 时优先选这些正统字源。
+# 不含个人书法家字典（赵之谦、吴昌硕等）——它们带书法个性
+# 和飞白，更适合闲章但不是单字印的默认偏好。
+PREFERRED_INSCRIPTION_SOURCES: frozenset[str] = frozenset({
+    "中国篆刻大字典",
+    "汉印文字征",
+    "汉印文字征七、八",
+    "汉印文字征五、六",
+    "汉印文字征九、十",
+    "汉印分韵",
+    "汉印分韵续集",
+    "汉印分韵选集",
+    "印谱大字典",
+    "篆字汇",
+    "六书通",
+})
+
 API_BASE = "https://api.ygsf.com/v2.4"
 AES_KEY = b"PkT!ihpN^QkQ62k%"
 
@@ -340,28 +358,49 @@ class CalligraphyScraper:
         warnings: list[str] = []
         best_fallback = None  # "chars found but no unified source" backup
 
-        # ── R9-P0-1: single/repeated char short-circuit ────
-        # When all chars are the same (禅, 朝朝), "unified source" check
-        # is meaningless and introduces side-effects: Pass 2's wider pool
-        # can pick obscure sources (楚简名品, 许氏说文序) whose average
-        # score is inflated by having few candidates.
+        # ── R9+R10: single/repeated char short-circuit ──────
+        # When all chars are the same (禅, 朝朝), skip Pass 2 unified
+        # source check entirely. Use _fetch_all_candidates with preferred
+        # source tie-break (R10): within ±5 score, prefer 汉印 orthodox
+        # sources over calligrapher personal dictionaries.
         unique_chars = set(text)
         if len(unique_chars) == 1:
             char = text[0]
             for font_style in priority:
-                img, tab, src = self._get_or_fetch(char, font_style)
-                if img is not None:
-                    images = [img] * len(text)
-                    tabs = [tab] * len(text)
-                    src_names = [src] * len(text)
+                cands = self._fetch_all_candidates(
+                    char, font_style, n=15,
+                    exclude_decorative=exclude_deco,
+                )
+                if not cands:
+                    continue
+
+                top_img, top_score, top_src, top_tab = cands[0]
+                selected = cands[0]
+
+                # R10 tie-break: prefer PREFERRED source within ±5 of top
+                for c in cands:
+                    if c[2] in PREFERRED_INSCRIPTION_SOURCES and c[1] >= top_score - 5.0:
+                        selected = c
+                        break
+
+                sel_img, sel_score, sel_src, sel_tab = selected
+                if sel_src != top_src:
                     logger.info(
-                        "[R9] 单字/重字短路: text='%s' font=%s src=%s",
-                        text, font_style, src,
+                        "[R10] 单字偏好 tie-break: '%s' top=%s(%.1f) → %s(%.1f)",
+                        text, top_src, top_score, sel_src, sel_score,
                     )
-                    return self._log_final(
-                        text, (images, font_style, False, tabs, src_names, [])
-                    )
-            logger.warning("[R9] 单字/重字短路失败: '%s' 进入 Pass 2", text)
+
+                images = [sel_img] * len(text)
+                tabs = [sel_tab] * len(text)
+                src_names = [sel_src] * len(text)
+                logger.info(
+                    "[R9+R10] 单字短路: text='%s' font=%s src=%s",
+                    text, font_style, sel_src,
+                )
+                return self._log_final(
+                    text, (images, font_style, False, tabs, src_names, [])
+                )
+            logger.warning("[R9+R10] 单字短路失败: '%s' 进入 Pass 2", text)
 
         for idx, font_style in enumerate(priority):
             # Step 1: verify font covers all chars (fast, uses cache)
