@@ -277,9 +277,23 @@ def clear_cache() -> int:
 class CalligraphyScraper:
     """Fetch calligraphy character images from ygsf.com with local font fallback."""
 
+    # 印章类型决定字体优先级和降级策略。
+    #
+    # 传统金石学里，印章类型和字体选择有严格对应关系：
+    # - 名章（姓名印、落款印）：必须篆书。"篆刻"二字本身就暗示了这一点。
+    #   名章绝不降级到隶楷，即便字源不同也要保证字体纯粹。
+    # - 闲章（书斋印、座右铭印、引首章）：以篆书为主，
+    #   但允许降级到隶楷（某些文人有用隶楷的先例）。
+    # - 品牌章（现代商业、社交媒体、内容创作者）：最灵活，
+    #   允许任何字体，以视觉效果为优先。
+    #
+    # fetch_chars_consistent 对 "name" 类型启用严格字体模式，
+    # 即便篆书统一源找不到也不降级，而是调用
+    # _force_assemble_single_font 在篆书内部强制组装。
     FONT_PRIORITY: dict[str, list[str]] = {
+        "name":    ["篆"],
         "leisure": ["篆", "隶", "楷"],
-        "name": ["隶", "楷"],
+        "brand":   ["篆", "隶", "楷"],
     }
 
     def __init__(self, no_api_cache: bool = False) -> None:
@@ -298,10 +312,15 @@ class CalligraphyScraper:
         Key principle: prefer lower-priority font with unified source over
         higher-priority font with mixed sources (隶书同源 > 篆书异源).
 
+        For seal_type="name", strict font mode prevents degradation to
+        non-篆 fonts. Even if no unified source exists, the result stays
+        in 篆 (via _force_assemble_single_font).
+
         Returns:
             (images, font_used, was_fallback, tab_sources, source_names, warnings)
         """
         priority = self.FONT_PRIORITY.get(seal_type, ["篆", "隶", "楷"])
+        strict_font = (seal_type == "name")
         warnings: list[str] = []
         best_fallback = None  # "chars found but no unified source" backup
 
@@ -401,6 +420,14 @@ class CalligraphyScraper:
             return best_fallback
 
         # ── Pass 2: no single style covers all — find best coverage ──
+
+        # Strict font mode (name): never degrade across fonts
+        if strict_font:
+            logger.warning(
+                "严格字体模式 (%s): 在 %s 内部强制组装", seal_type, priority
+            )
+            return self._force_assemble_single_font(text, priority[0])
+
         logger.warning("No single font style covers all chars in '%s'", text)
 
         # Build availability matrix
@@ -643,6 +670,44 @@ class CalligraphyScraper:
                 fb_chars.append(char)
 
         return images, tabs_, src_names, best_src, fb_chars
+
+    # ── strict font force-assembly ───────────────────────────
+
+    def _force_assemble_single_font(
+        self, text: str, font_style: str
+    ) -> tuple[list[Image.Image], str, bool, list[str], list[str], list[str]]:
+        """Force-assemble all chars in a single font, even if sources differ.
+
+        Used by strict font mode (name seals): better to have mixed-source
+        篆書 than to degrade to 隸書/楷書.
+        """
+        images: list[Image.Image] = []
+        tabs: list[str] = []
+        src_names: list[str] = []
+        warnings: list[str] = []
+        sources_used: list[str] = []
+
+        for char in text:
+            img, tab, src_name = self._get_or_fetch(char, font_style)
+            if img is None:
+                logger.warning("强制组装: '%s' 在 %s 中不可得, 本地兜底", char, font_style)
+                images.append(self._render_local_fallback(char))
+                tabs.append("本地")
+                src_names.append("")
+            else:
+                images.append(img)
+                tabs.append(tab)
+                src_names.append(src_name)
+                if src_name:
+                    sources_used.append(src_name)
+
+        unique = set(sources_used)
+        if len(unique) > 1:
+            warnings.append(f"严格字体({font_style})：{len(unique)} 个不同字源")
+        elif len(unique) == 1:
+            warnings.append(f"统一来源: {list(unique)[0]}")
+
+        return images, font_style, False, tabs, src_names, warnings
 
     # ── cache-then-web helper ───────────────────────────────
 

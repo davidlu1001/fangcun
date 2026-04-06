@@ -99,6 +99,12 @@ class SealLayout:
                 fitted = self._fit_to_cell(mask, cell_w, cell_h, margin)
             fitted_list.append(fitted)
 
+        # ── Phase 1.5: 2-char fill balance ──────────────────
+        if n == 2:
+            fitted_list = self._balance_two_chars(
+                fitted_list, grid, tw, th
+            )
+
         # ── Phase 2: Detect extreme chars + sibling stroke width ──
         extreme_indices: list[tuple[int, str]] = []
         normal_widths: list[float] = []
@@ -241,6 +247,45 @@ class SealLayout:
         return mask.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
     # ── extreme flat character handling ─────────────────────
+
+    @staticmethod
+    def _balance_two_chars(
+        fitted_list: list[Image.Image],
+        grid: list[tuple[float, float, float, float]],
+        tw: int,
+        th: int,
+    ) -> list[Image.Image]:
+        """Equalize fill ratio for 2-char seals.
+
+        When one char fills significantly less of its cell, scale it up
+        to match the other (max 1.25x, won't exceed cell width).
+        """
+        fill_ratios = []
+        for i, fitted in enumerate(fitted_list):
+            cell_h_px = int(grid[i][3] * th)
+            fill_ratios.append(fitted.height / cell_h_px if cell_h_px > 0 else 0)
+
+        if not all(r > 0 for r in fill_ratios):
+            return fitted_list
+
+        target = max(fill_ratios) * 0.95
+        result = list(fitted_list)
+        for i, fitted in enumerate(fitted_list):
+            if fill_ratios[i] < target * 0.90:
+                cell_w_px = int(grid[i][2] * tw)
+                scale = min(
+                    target / fill_ratios[i],
+                    (cell_w_px * 0.90) / max(fitted.width, 1),
+                    1.25,
+                )
+                if scale > 1.05:
+                    new_w = int(fitted.width * scale)
+                    new_h = int(fitted.height * scale)
+                    result[i] = fitted.resize(
+                        (new_w, new_h), Image.Resampling.LANCZOS
+                    )
+
+        return result
 
     @staticmethod
     def _estimate_stroke_width(mask_arr: np.ndarray) -> float:

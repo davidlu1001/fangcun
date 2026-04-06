@@ -56,10 +56,14 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--type",
-        choices=["leisure", "name"],
+        choices=["leisure", "name", "brand"],
         default="leisure",
         dest="seal_type",
-        help="章类: leisure=闲章, name=名章 (default: leisure)",
+        help=(
+            "章类: name=名章（强制篆书）, "
+            "leisure=闲章（优先篆书，允许隶楷）, "
+            "brand=品牌章（任何字体） (default: leisure)"
+        ),
     )
     p.add_argument(
         "--color", type=str, default="#B22222", help="朱砂颜色 hex (default: #B22222)"

@@ -26,7 +26,7 @@ _gen = SealGenerator()
 
 _SHAPE_MAP = {"竖椭圆": "oval", "方章": "square"}
 _STYLE_MAP = {"白文": "baiwen", "朱文": "zhuwen"}
-_TYPE_MAP = {"闲章": "leisure", "名章": "name"}
+_TYPE_MAP = {"名章（强制篆书）": "name", "闲章（允许隶楷）": "leisure", "品牌章（任何字体）": "brand"}
 
 
 def generate_seal(
@@ -123,9 +123,9 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
             )
 
             seal_type_input = gr.Radio(
-                choices=["闲章", "名章"],
+                choices=["名章（强制篆书）", "闲章（允许隶楷）", "品牌章（任何字体）"],
                 label="📋 章类",
-                value="闲章",
+                value="闲章（允许隶楷）",
             )
 
             color_input = gr.ColorPicker(

@@ -45,9 +45,14 @@ Level 5: 各字独立最优     per-char best (last resort)
 - Cache check before `time.sleep`/`_encrypt_params` for zero-latency hits
 - CLI: `--cache-info`, `--clear-cache`, `--no-api-cache` flags
 
+**Seal type semantics** (金石学 DSL):
+- `name` (名章): strict 篆 only, never degrades. `_force_assemble_single_font` as fallback.
+- `leisure` (闲章): 篆→隶→楷 with deferred state machine
+- `brand` (品牌章): 篆→隶→楷, most flexible
+
 **Other scraper decisions**:
 - Tab priority: 字典 (type=3) → 真迹 (type=2), never 字库 (type=1)
-- Font consistency: all chars must share same script. 闲章: 篆→隶→楷; 名章: 隶→楷
+- Font consistency: all chars must share same script
 - Simplified→traditional: opencc auto-tries 蘇 when 苏 fails
 - Atomic cache writes (tempfile + os.replace)
 - AES-ECB encrypted API. Protocol in `scraper.py` header.
@@ -79,6 +84,7 @@ Phase 2 — Edge inset per chunk:
 `SealLayout.arrange()` runs five phases:
 
 1. **Normal fit**: Equal-ratio scaling + conditional tall/wide cell stretch (max 1.25x)
+1.5. **2-char balance**: Equalize fill ratio when gap > 10% (scale up smaller char, max 1.25x)
 2. **Extreme detection**: Identify chars with aspect > 2.5 (一二三) or < 0.4, compute sibling median stroke width
 3. **Reverse construction**: Extreme chars rebuilt from scratch — resize stroke to target width, center in padded canvas (ink_ratio ≤ 55%, length = 70% cell)
 4. **Stroke-width normalize**: Distance-transform-based equalization for normal chars (dilate < 0.75x median, erode > 1.35x)
