@@ -88,6 +88,19 @@ IMG_CACHE_DIR = CACHE_DIR / "_img"   # Downloaded candidate images from CDN
 _POSITIVE_TTL_DAYS = 30
 _NEGATIVE_TTL_DAYS = 7
 
+# ── 装饰性字源（鸟虫篆/玉箸篆等花体字）────────────────────
+# 笔画盘绕扭曲成鸟形/虫形，设计目的是"美观但难辨识"。
+# 来自一次实战 bug："卢修齐"名章中"卢"字只有 1 个鸟虫篆候选，
+# 89.4 分高分独占，导致整枚名章气质分裂。
+#
+# 按 seal_type 分层处理：
+#   name:    完全排除（_fetch_all_candidates 级别跳过）
+#   leisure: _score_image 大幅降权 (-40)，能用但排末位
+#   brand:   无限制（装饰性是加分项）
+DECORATIVE_SOURCES: frozenset[str] = frozenset({
+    "鸟虫篆全书",
+})
+
 API_BASE = "https://api.ygsf.com/v2.4"
 AES_KEY = b"PkT!ihpN^QkQ62k%"
 
@@ -321,6 +334,7 @@ class CalligraphyScraper:
         """
         priority = self.FONT_PRIORITY.get(seal_type, ["篆", "隶", "楷"])
         strict_font = (seal_type == "name")
+        exclude_deco = (seal_type == "name")
         warnings: list[str] = []
         best_fallback = None  # "chars found but no unified source" backup
 
@@ -346,7 +360,9 @@ class CalligraphyScraper:
 
             # Step 2: try unified source (n=5, then n=10)
             all_cands = {
-                char: self._fetch_all_candidates(char, font_style)
+                char: self._fetch_all_candidates(
+                    char, font_style, exclude_decorative=exclude_deco
+                )
                 for char in text
             }
 
@@ -363,7 +379,9 @@ class CalligraphyScraper:
 
             logger.info("n=5 无统一来源, 扩大至 n=10")
             all_cands_wide = {
-                char: self._fetch_all_candidates(char, font_style, n=10)
+                char: self._fetch_all_candidates(
+                    char, font_style, n=10, exclude_decorative=exclude_deco
+                )
                 for char in text
             }
 
@@ -878,12 +896,21 @@ class CalligraphyScraper:
         return self._download_best_image(glyph_list)
 
     def _fetch_all_candidates(
-        self, char: str, font_style: str, n: int = 5
+        self,
+        char: str,
+        font_style: str,
+        n: int = 5,
+        exclude_decorative: bool = False,
     ) -> list[tuple[Image.Image, float, str, str]]:
         """
         Fetch up to n scored candidates for a char across tabs.
+
+        Args:
+            exclude_decorative: If True, skip DECORATIVE_SOURCES entirely.
+                Used for name seals — better to have no candidate than
+                a decorative one that ruins the seal's gravitas.
+
         Returns [(img, score, source_name, tab), ...] sorted by score desc.
-        Used for unified source selection.
         """
         all_candidates: list[tuple[Image.Image, float, str, str]] = []
 
@@ -898,6 +925,16 @@ class CalligraphyScraper:
                 glyph_list = self._query_glyph_list(try_char, font_style, tab_type)
                 if not glyph_list:
                     continue
+
+                # Name seals: hard-filter decorative sources at glyph level
+                if exclude_decorative:
+                    glyph_list = [
+                        g for g in glyph_list
+                        if g.get("_from", "") not in DECORATIVE_SOURCES
+                    ]
+                    if not glyph_list:
+                        continue
+
                 scored = self._download_scored_candidates(glyph_list, max_n=n)
                 for img, score, src in scored:
                     if score > 0:
@@ -1119,6 +1156,10 @@ class CalligraphyScraper:
         }
         if source_name in _INFERIOR_STYLE_SOURCES:
             base = max(0.0, base - 25.0)
+
+        # 装饰性字源（鸟虫篆等）：大幅降权，排在正统篆书之后
+        if source_name in DECORATIVE_SOURCES:
+            base = max(0.0, base - 40.0)
 
         return base
 

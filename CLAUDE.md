@@ -46,9 +46,15 @@ Level 5: 各字独立最优     per-char best (last resort)
 - CLI: `--cache-info`, `--clear-cache`, `--no-api-cache` flags
 
 **Seal type semantics** (金石学 DSL):
-- `name` (名章): strict 篆 only, never degrades. `_force_assemble_single_font` as fallback.
-- `leisure` (闲章): 篆→隶→楷 with deferred state machine
-- `brand` (品牌章): 篆→隶→楷, most flexible
+- `name` (名章): strict 篆 only, never degrades. Decorative sources (鸟虫篆) hard-filtered. `_force_assemble_single_font` as fallback.
+- `leisure` (闲章): 篆→隶→楷 with deferred state machine. Decorative sources -40 penalty.
+- `brand` (品牌章): 篆→隶→楷, most flexible. No decorative filtering.
+
+**Decorative source filtering** (`DECORATIVE_SOURCES`):
+- 鸟虫篆全书 etc. — ornamental scripts unsuitable for name seals
+- name: hard-excluded at `_fetch_all_candidates` level
+- leisure: -40 penalty in `_score_image` (selectable but last resort)
+- brand: no restriction
 
 **Other scraper decisions**:
 - Tab priority: 字典 (type=3) → 真迹 (type=2), never 字库 (type=1)

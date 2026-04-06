@@ -154,13 +154,13 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
         # ── Right panel: preview ─────────────────────────────
         with gr.Column(scale=1):
             transparent_output = gr.Image(
-                label="印章预览（透明底）",
+                label="印章（透明底，用于实际盖章）",
                 type="pil",
                 interactive=False,
             )
 
             preview_output = gr.Image(
-                label="印章预览（白底）",
+                label="印章预览（白底，仅供查看效果）",
                 type="pil",
                 interactive=False,
             )
@@ -169,11 +169,11 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
 
             with gr.Row():
                 dl_transparent = gr.DownloadButton(
-                    label="⬇ 下载 PNG（透明底）",
+                    label="⬇ 下载 PNG（透明底 · 主用）",
                     visible=True,
                 )
                 dl_preview = gr.DownloadButton(
-                    label="⬇ 下载 PNG（白底预览）",
+                    label="⬇ 下载 PNG（白底预览 · 备用）",
                     visible=True,
                 )
 
