@@ -18,8 +18,12 @@ Oval frame dimensions (short side S):
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from PIL import Image, ImageDraw
+
+logger = logging.getLogger(__name__)
 
 
 OVAL_RATIO = 1.35  # height / width
@@ -97,10 +101,17 @@ class SealRenderer:
 
         # Paste characters as white cutouts
         paper_color = (245, 242, 238, 255)  # warm paper white
-        for item in layout:
+        for idx, item in enumerate(layout):
             mask = item["img"]  # mode "L", 255 = stroke
             x, y = item["x"], item["y"]
             target_w, target_h = item["w"], item["h"]
+
+            outside = x < 0 or y < 0 or x + target_w > w or y + target_h > h
+            logger.debug(
+                "[R9-P1] baiwen paste[%d]: pos=(%d,%d) size=%dx%d canvas=%dx%d %s",
+                idx, x, y, target_w, target_h, w, h,
+                "OUTSIDE!" if outside else "ok",
+            )
 
             resized_mask = mask.resize(
                 (target_w, target_h), Image.Resampling.LANCZOS
@@ -166,10 +177,17 @@ class SealRenderer:
 
         # ── Character alpha layer ───────────────────────────
         char_alpha = np.zeros((h, w), dtype=np.uint8)
-        for item in layout:
+        for idx, item in enumerate(layout):
             mask = item["img"]
             x, y = item["x"], item["y"]
             target_w, target_h = item["w"], item["h"]
+
+            outside = x < 0 or y < 0 or x + target_w > w or y + target_h > h
+            logger.debug(
+                "[R9-P1] zhuwen paste[%d]: pos=(%d,%d) size=%dx%d canvas=%dx%d %s",
+                idx, x, y, target_w, target_h, w, h,
+                "OUTSIDE!" if outside else "ok",
+            )
 
             resized = np.array(
                 mask.resize((target_w, target_h), Image.Resampling.LANCZOS)
@@ -264,7 +282,14 @@ class SealRenderer:
         else:
             frame_total = max(2, round(w * 0.018)) + 2
 
-        if style == "zhuwen":
+        if style == "zhuwen" and shape == "oval":
+            # R11: Oval's 4 corners fall outside the ellipse curve.
+            # text_scale=0.98 pushes cells into those corners, causing
+            # shape-mask clipping (e.g. 大观園 観字 right half cut off).
+            # Use 0.88 for oval to keep text area inside the ellipse.
+            # Square zhuwen keeps 0.98 (no corner clipping issue).
+            text_scale = 0.88
+        elif style == "zhuwen":
             text_scale = 0.98
         elif char_count == 1:
             text_scale = 0.93
