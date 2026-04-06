@@ -100,6 +100,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="显示缓存统计后退出",
     )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="启用详细调试日志（候选列表、打分细节）",
+    )
 
     return p.parse_args()
 
@@ -149,8 +154,9 @@ def _generate_one(
 def main() -> None:
     args = _parse_args()
 
+    log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(message)s",
         handlers=[RichHandler(console=console, show_time=False, show_path=False)],
     )

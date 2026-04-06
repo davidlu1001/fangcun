@@ -50,16 +50,20 @@ Level 5: 各字独立最优     per-char best (last resort)
 - `leisure` (闲章): 篆→隶→楷 with deferred state machine. Decorative sources -40 penalty.
 - `brand` (品牌章): 篆→隶→楷, most flexible. No decorative filtering.
 
-**Decorative source filtering** (`DECORATIVE_SOURCES`):
-- 鸟虫篆全书 etc. — ornamental scripts unsuitable for name seals
-- name: hard-excluded at `_fetch_all_candidates` level
-- leisure: -40 penalty in `_score_image` (selectable but last resort)
-- brand: no restriction
+**Source quality controls**:
+- `DECORATIVE_SOURCES` (鸟虫篆全书): name=hard-excluded, leisure=-40, brand=no restriction
+- Structural integrity penalty (R8-A): max_ratio < 0.40 → -35, < 0.60 → -10 (prevents fragmented abstract glyphs from scoring high)
+- `_INFERIOR_STYLE_SOURCES` (金文/简帛): -25
+
+**Traditional-first strategy** (R8-B):
+- 篆書 predates simplified/traditional split by ~2000 years. Serious dictionaries (中国篆刻大字典, 汉印文字征) index by traditional forms.
+- `_get_or_fetch` and `_fetch_all_candidates`: try 齊 before 齐, 盧 before 卢
+- name type: strict break after traditional candidates found (skip simplified)
+- leisure/brand: flexible, both forms queried, merged pool
 
 **Other scraper decisions**:
 - Tab priority: 字典 (type=3) → 真迹 (type=2), never 字库 (type=1)
 - Font consistency: all chars must share same script
-- Simplified→traditional: opencc auto-tries 蘇 when 苏 fails
 - Atomic cache writes (tempfile + os.replace)
 - AES-ECB encrypted API. Protocol in `scraper.py` header.
 

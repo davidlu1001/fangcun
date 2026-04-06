@@ -312,6 +312,7 @@ class CalligraphyScraper:
     def __init__(self, no_api_cache: bool = False) -> None:
         self._session = requests.Session()
         self._no_api_cache = no_api_cache
+        self._current_seal_type = "leisure"  # set by fetch_chars_consistent
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         API_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         IMG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -335,6 +336,7 @@ class CalligraphyScraper:
         priority = self.FONT_PRIORITY.get(seal_type, ["篆", "隶", "楷"])
         strict_font = (seal_type == "name")
         exclude_deco = (seal_type == "name")
+        self._current_seal_type = seal_type
         warnings: list[str] = []
         best_fallback = None  # "chars found but no unified source" backup
 
@@ -375,9 +377,9 @@ class CalligraphyScraper:
                 warnings.append(f"统一来源: {u_source}")
                 if idx > 0:
                     warnings.append(f"首选{priority[0]}降级至{font_style}")
-                return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
+                return self._log_final(text, (u_images, font_style, idx > 0, u_tabs, u_srcs, warnings))
 
-            logger.info("n=5 无统一来源, 扩大至 n=10")
+            logger.debug("n=5 无统一来源, 扩大至 n=10")
             all_cands_wide = {
                 char: self._fetch_all_candidates(
                     char, font_style, n=10, exclude_decorative=exclude_deco
@@ -394,11 +396,11 @@ class CalligraphyScraper:
                 warnings.append(f"统一来源: {u_source}")
                 if idx > 0:
                     warnings.append(f"首选{priority[0]}降级至{font_style}")
-                return u_images, font_style, idx > 0, u_tabs, u_srcs, warnings
+                return self._log_final(text, (u_images, font_style, idx > 0, u_tabs, u_srcs, warnings))
 
             # ★ Deferred: chars found but no unified source → save as fallback
             # and continue to next font (隶书同源 > 篆书异源)
-            logger.warning(
+            logger.debug(
                 "%s 无统一来源, 记录备胎, 继续尝试降级字体", font_style
             )
 
@@ -435,7 +437,7 @@ class CalligraphyScraper:
         # All fonts tried, no perfect unified source
         if best_fallback is not None:
             logger.warning("所有字体无完美统一来源, 启用最优备胎: %s", best_fallback[1])
-            return best_fallback
+            return self._log_final(text, best_fallback)
 
         # ── Pass 2: no single style covers all — find best coverage ──
 
@@ -444,7 +446,7 @@ class CalligraphyScraper:
             logger.warning(
                 "严格字体模式 (%s): 在 %s 内部强制组装", seal_type, priority
             )
-            return self._force_assemble_single_font(text, priority[0])
+            return self._log_final(text, self._force_assemble_single_font(text, priority[0]))
 
         logger.warning("No single font style covers all chars in '%s'", text)
 
@@ -500,7 +502,7 @@ class CalligraphyScraper:
         warnings.append(
             f"书体不统一：主体{best_style}，但 {', '.join(mixed_chars)}"
         )
-        return images, best_style, True, tabs, src_names, warnings
+        return self._log_final(text, (images, best_style, True, tabs, src_names, warnings))
 
     # ── unified source selection ────────────────────────────
 
@@ -689,6 +691,21 @@ class CalligraphyScraper:
 
         return images, tabs_, src_names, best_src, fb_chars
 
+    # ── log helper ──────────────────────────────────────────
+
+    @staticmethod
+    def _log_final(
+        text: str,
+        result: tuple[list[Image.Image], str, bool, list[str], list[str], list[str]],
+    ) -> tuple[list[Image.Image], str, bool, list[str], list[str], list[str]]:
+        """Log final source decision before returning from fetch_chars_consistent."""
+        _, font_style, _, _, src_names, _ = result
+        summary = "、".join(
+            f"'{c}'→{src or '本地'}" for c, src in zip(text, src_names)
+        )
+        logger.info("[Final] 最终字源: %s (font=%s)", summary, font_style)
+        return result
+
     # ── strict font force-assembly ───────────────────────────
 
     def _force_assemble_single_font(
@@ -734,22 +751,26 @@ class CalligraphyScraper:
     ) -> tuple[Optional[Image.Image], str, str]:
         """
         Try each tab (字典→真迹) via cache then web.
-        Also tries traditional form (苏→蘇) if original not found.
+
+        R8-B: Traditional-first — tries 蘇 before 苏, 齊 before 齐.
+        Cache key uses original char (simplified) for stability.
 
         Returns: (image, tab_source, source_name) or (None, '', '')
         """
-        chars_to_try = [char]
+        # R8-B: 繁優先 — traditional form first for all seal types
         trad = _to_traditional(char)
+        chars_to_try: list[str] = []
         if trad is not None:
             chars_to_try.append(trad)
+        chars_to_try.append(char)
 
         for try_char in chars_to_try:
             for tab_name, tab_type in TAB_PRIORITY:
-                # Cache check (keyed by original char)
+                # Cache check (keyed by original char for stability)
                 cached = self._load_cache(char, font_style, tab_name)
                 if cached is not None:
                     src_name = self._load_cache_meta(char, font_style, tab_name)
-                    logger.info("Cache hit: '%s' in %s/%s", char, font_style, tab_name)
+                    logger.info("[Pass1] Cache hit: '%s' in %s/%s", char, font_style, tab_name)
                     return cached, tab_name, src_name
 
                 # Web fetch — returns (image, source_name)
@@ -758,12 +779,12 @@ class CalligraphyScraper:
                     self._save_cache(char, font_style, tab_name, img, src_name)
                     if try_char != char:
                         logger.info(
-                            "Fetched '%s' (繁体'%s') in %s/%s from=%s",
+                            "[Pass1] Fetched '%s' (繁体'%s') in %s/%s from=%s",
                             char, try_char, font_style, tab_name, src_name,
                         )
                     else:
                         logger.info(
-                            "Fetched '%s' in %s/%s from=%s",
+                            "[Pass1] Fetched '%s' in %s/%s from=%s",
                             char, font_style, tab_name, src_name,
                         )
                     return img, tab_name, src_name
@@ -905,20 +926,25 @@ class CalligraphyScraper:
         """
         Fetch up to n scored candidates for a char across tabs.
 
-        Args:
-            exclude_decorative: If True, skip DECORATIVE_SOURCES entirely.
-                Used for name seals — better to have no candidate than
-                a decorative one that ruins the seal's gravitas.
+        R8-B: Traditional-first strategy. Serious seal dictionaries (中国篆刻大字典,
+        汉印文字征) index by traditional forms. 篆書 predates the simplified/traditional
+        split by ~2000 years — traditional IS the native form.
+
+        - name type: strict trad-first. Break after traditional candidates found.
+        - leisure/brand: flexible. Query both forms, merge candidate pool.
 
         Returns [(img, score, source_name, tab), ...] sorted by score desc.
         """
         all_candidates: list[tuple[Image.Image, float, str, str]] = []
 
-        # Try traditional form too
-        chars_to_try = [char]
+        # R8-B: 繁優先 — traditional form first
         trad = _to_traditional(char)
+        chars_to_try: list[str] = []
         if trad is not None:
             chars_to_try.append(trad)
+        chars_to_try.append(char)
+
+        strict_trad_first = (self._current_seal_type == "name")
 
         for try_char in chars_to_try:
             for tab_name, tab_type in TAB_PRIORITY:
@@ -941,6 +967,11 @@ class CalligraphyScraper:
                         all_candidates.append((img, score, src, tab_name))
 
             if all_candidates:
+                if strict_trad_first and try_char != char:
+                    logger.info(
+                        "[R8-B] name 严格繁优先: '%s'→'%s' 拿到 %d 候选, 跳过简体",
+                        char, try_char, len(all_candidates),
+                    )
                 break
 
         all_candidates.sort(key=lambda c: c[1], reverse=True)
@@ -1160,6 +1191,38 @@ class CalligraphyScraper:
         # 装饰性字源（鸟虫篆等）：大幅降权，排在正统篆书之后
         if source_name in DECORATIVE_SOURCES:
             base = max(0.0, base - 40.0)
+
+        # ── 结构完整度惩罚（R8-A）─────────────────────────
+        # 防止图像质量高但结构碎片化的"抽象古文字"被误判高分。
+        # 合理的篆书字应有 1 个主导连通块占总墨量 > 60%。
+        #
+        # 阈值来自 2026-04 实测：
+        #   赵之谦蝌蚪齐: max_ratio=0.29 → 重罚
+        #   赵之谦三竖齐: max_ratio=0.73 → 不动
+        #   中国篆刻大字典齊: max_ratio=1.00 → 不动
+        binary_cc = (gray < 128).astype(np.uint8)
+        ink_total = int(binary_cc.sum())
+
+        if ink_total > 100:
+            n_cc, _, cc_stats, _ = cv2.connectedComponentsWithStats(
+                binary_cc, connectivity=8
+            )
+            if n_cc > 1:
+                areas = cc_stats[1:, cv2.CC_STAT_AREA]
+                if len(areas) > 0:
+                    max_ratio = int(areas.max()) / ink_total
+                    if max_ratio < 0.40:
+                        base = max(0.0, base - 35.0)
+                        logger.info(
+                            "[R8-A] 结构碎片重罚 -35: max_ratio=%.2f, #cc=%d, src=%s",
+                            max_ratio, n_cc - 1, source_name,
+                        )
+                    elif max_ratio < 0.60:
+                        base = max(0.0, base - 10.0)
+                        logger.debug(
+                            "[R8-A] 结构碎片轻罚 -10: max_ratio=%.2f, #cc=%d, src=%s",
+                            max_ratio, n_cc - 1, source_name,
+                        )
 
         return base
 
