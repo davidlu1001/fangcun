@@ -2,11 +2,19 @@
 Traditional Chinese seal character layout engine.
 
 Reading order (right-to-left, top-to-bottom):
-  1 char  → centered, 15% margin
+  1 char  → centered
   2 chars → vertical stack (top / bottom)
   3 chars → right column 2 + left column 1 (vertically centered)
   4 chars → 2×2 grid: 右上→右下→左上→左下
   >4 chars → warning + auto-shrink to fit
+
+Features:
+  - Dynamic margin by (style, shape) via MARGIN_TABLE
+  - Conditional vertical/horizontal stretch for tall/wide cells (max 1.25x)
+  - Zhuwen margin bleeding: 4% bleed with text_scale=0.98 (冲刀破边)
+  - Stroke width normalization via distance transform
+  - Extreme flat chars (一二三): reverse-constructed from sibling stroke width
+  - Visual centroid compensation (0.65 coefficient)
 """
 
 from __future__ import annotations
@@ -14,6 +22,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+import cv2
+import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -36,23 +46,28 @@ class Placement:
 class SealLayout:
     """Arrange character masks inside a text-area rectangle."""
 
-    MARGIN_RATIO = 0.10  # padding inside each grid cell (0.15 was too loose)
+    # Dynamic margin by (style, shape). Smaller = more filled seal.
+    MARGIN_TABLE: dict[tuple[str, str], float] = {
+        ("baiwen", "square"): 0.06,
+        ("baiwen", "oval"): 0.04,
+        ("zhuwen", "square"): 0.03,
+        ("zhuwen", "oval"): 0.01,
+    }
 
     def arrange(
         self,
         char_imgs: list[Image.Image],
         shape: str,
         canvas_size: tuple[int, int],
+        style: str = "baiwen",
     ) -> list[dict]:
-        """
-        Args:
-            char_imgs: list of mode-"L" character masks (already extracted)
-            shape:     'oval' | 'square'
-            canvas_size: (width, height) of the text area
+        """Multi-phase layout: fit → detect extreme → reverse-construct → normalize.
 
-        Returns:
-            [{'img': Image, 'x': int, 'y': int, 'w': int, 'h': int}, ...]
-            Coordinates are relative to the text-area origin.
+        Phase 1: Normal fit_to_cell for all chars (equal-ratio + cell stretch)
+        Phase 2: Detect extreme-aspect chars, compute sibling stroke width
+        Phase 3: Reverse-construct extreme chars using sibling stroke width
+        Phase 4: Stroke-width normalize remaining normal chars
+        Phase 5: Build placements with centroid compensation
         """
         n = len(char_imgs)
         if n == 0:
@@ -60,33 +75,98 @@ class SealLayout:
 
         tw, th = canvas_size
         grid = self._grid_map(n)
+        margin = self.MARGIN_TABLE.get((style, shape), 0.04)
 
         if n > 4:
             logger.warning("超过4字 (%d字), 自动缩小适配", n)
 
-        placements: list[dict] = []
+        # ── Phase 1: Normal fit ─────────────────────────────
+        cells: list[tuple[int, int, int, int]] = []
+        fitted_list: list[Image.Image] = []
+
         for i, (rx, ry, rw, rh) in enumerate(grid):
             cell_x = int(rx * tw)
             cell_y = int(ry * th)
             cell_w = int(rw * tw)
             cell_h = int(rh * th)
+            cells.append((cell_x, cell_y, cell_w, cell_h))
 
             mask = char_imgs[i]
-            fitted = self._fit_to_cell(mask, cell_w, cell_h)
+            if style == "zhuwen":
+                bleed = int(min(cell_w, cell_h) * 0.04)
+                fitted = self._fit_to_cell(mask, cell_w + bleed, cell_h + bleed, margin=0.0)
+            else:
+                fitted = self._fit_to_cell(mask, cell_w, cell_h, margin)
+            fitted_list.append(fitted)
 
-            # Center the fitted character in its grid cell
-            px = cell_x + (cell_w - fitted.width) // 2
-            py = cell_y + (cell_h - fitted.height) // 2
+        # ── Phase 2: Detect extreme chars + sibling stroke width ──
+        extreme_indices: list[tuple[int, str]] = []
+        normal_widths: list[float] = []
 
-            placements.append(
-                {
-                    "img": fitted,
-                    "x": px,
-                    "y": py,
-                    "w": fitted.width,
-                    "h": fitted.height,
-                }
+        for i, mask in enumerate(char_imgs):
+            src_w, src_h = mask.size
+            aspect = src_w / max(src_h, 1)
+            if aspect > 2.5:
+                extreme_indices.append((i, "horizontal"))
+            elif aspect < 0.4:
+                extreme_indices.append((i, "vertical"))
+            else:
+                sw = self._estimate_stroke_width(np.array(fitted_list[i]))
+                if sw > 0:
+                    normal_widths.append(sw)
+
+        if normal_widths:
+            sibling_sw = float(np.median(normal_widths))
+        else:
+            # All chars are extreme — use canvas-relative fallback
+            sibling_sw = min(tw, th) * 0.025
+
+        # ── Phase 3: Reverse-construct extreme chars ────────
+        extreme_set = {idx for idx, _ in extreme_indices}
+        for idx, orientation in extreme_indices:
+            cell_x, cell_y, cell_w, cell_h = cells[idx]
+            fitted_list[idx] = self._fit_extreme_flat(
+                char_imgs[idx], cell_w, cell_h,
+                target_stroke_width=sibling_sw,
+                orientation=orientation,
             )
+
+        # ── Phase 4: Stroke-width normalize normal chars ────
+        if n > 1 and sibling_sw > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            for i in range(n):
+                if i in extreme_set:
+                    continue
+                sw = self._estimate_stroke_width(np.array(fitted_list[i]))
+                if sw <= 0:
+                    continue
+                ratio = sw / sibling_sw
+                if ratio < 0.75:
+                    arr = np.array(fitted_list[i])
+                    arr = cv2.dilate(arr, k, iterations=1)
+                    fitted_list[i] = Image.fromarray(arr, "L")
+                elif ratio > 1.35:
+                    arr = np.array(fitted_list[i])
+                    arr = cv2.erode(arr, k, iterations=1)
+                    fitted_list[i] = Image.fromarray(arr, "L")
+
+        # ── Phase 5: Build placements with centroid offset ──
+        placements: list[dict] = []
+        for i in range(n):
+            cell_x, cell_y, cell_w, cell_h = cells[i]
+            fitted = fitted_list[i]
+
+            dx, dy = self._centroid_offset(fitted)
+            px = cell_x + (cell_w - fitted.width) // 2 - int(dx * 0.65)
+            py = cell_y + (cell_h - fitted.height) // 2 - int(dy * 0.65)
+
+            placements.append({
+                "img": fitted,
+                "x": px,
+                "y": py,
+                "w": fitted.width,
+                "h": fitted.height,
+            })
 
         return placements
 
@@ -94,46 +174,33 @@ class SealLayout:
 
     @staticmethod
     def _grid_map(n: int) -> list[tuple[float, float, float, float]]:
-        """
-        Return grid cells as (rel_x, rel_y, rel_w, rel_h) for *n* characters.
-        Traditional right-to-left reading order.
-        """
+        """Return grid cells as (rel_x, rel_y, rel_w, rel_h) for n characters."""
         if n == 1:
             return [(0.0, 0.0, 1.0, 1.0)]
-
         if n == 2:
-            # Vertical stack
             return [
-                (0.0, 0.0, 1.0, 0.5),   # top
-                (0.0, 0.5, 1.0, 0.5),   # bottom
+                (0.0, 0.0, 1.0, 0.5),
+                (0.0, 0.5, 1.0, 0.5),
             ]
-
         if n == 3:
-            # Right column: char 0 (top), char 1 (bottom)
-            # Left column:  char 2 (vertically centered → full height)
             return [
-                (0.5, 0.0, 0.5, 0.5),   # right-top
-                (0.5, 0.5, 0.5, 0.5),   # right-bottom
-                (0.0, 0.0, 0.5, 1.0),   # left-center
+                (0.5, 0.0, 0.5, 0.5),
+                (0.5, 0.5, 0.5, 0.5),
+                (0.0, 0.0, 0.5, 1.0),
             ]
-
         if n == 4:
-            # 2×2 grid, reading: 右上→右下→左上→左下
             return [
-                (0.5, 0.0, 0.5, 0.5),   # right-top
-                (0.5, 0.5, 0.5, 0.5),   # right-bottom
-                (0.0, 0.0, 0.5, 0.5),   # left-top
-                (0.0, 0.5, 0.5, 0.5),   # left-bottom
+                (0.5, 0.0, 0.5, 0.5),
+                (0.5, 0.5, 0.5, 0.5),
+                (0.0, 0.0, 0.5, 0.5),
+                (0.0, 0.5, 0.5, 0.5),
             ]
-
-        # >4 chars: calculate grid dynamically
         cols = 2
         rows = (n + cols - 1) // cols
         cells: list[tuple[float, float, float, float]] = []
         cw = 1.0 / cols
         ch = 1.0 / rows
         idx = 0
-        # Right column first, then left (right-to-left)
         for col in range(cols - 1, -1, -1):
             for row in range(rows):
                 if idx >= n:
@@ -144,11 +211,11 @@ class SealLayout:
 
     # ── fitting ──────────────────────────────────────────────
 
+    @staticmethod
     def _fit_to_cell(
-        self, mask: Image.Image, cell_w: int, cell_h: int
+        mask: Image.Image, cell_w: int, cell_h: int, margin: float = 0.04
     ) -> Image.Image:
-        """Resize mask to fit within cell respecting margin and aspect ratio."""
-        margin = self.MARGIN_RATIO
+        """Resize mask to fit within cell. Conditional stretch for tall/wide cells."""
         max_w = max(1, int(cell_w * (1 - margin)))
         max_h = max(1, int(cell_h * (1 - margin)))
 
@@ -160,4 +227,101 @@ class SealLayout:
         new_w = max(1, int(src_w * scale))
         new_h = max(1, int(src_h * scale))
 
+        # Tall cells: up to 1.25x vertical stretch
+        cell_ratio = max_h / max(max_w, 1)
+        if cell_ratio > 1.5 and new_h / max_h < 0.85:
+            target_h = int(max_h * 0.90)
+            stretch = min(1.25, target_h / max(new_h, 1))
+            new_h = int(new_h * stretch)
+        elif cell_ratio < 0.67 and new_w / max_w < 0.85:
+            target_w = int(max_w * 0.90)
+            stretch = min(1.25, target_w / max(new_w, 1))
+            new_w = int(new_w * stretch)
+
         return mask.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    # ── extreme flat character handling ─────────────────────
+
+    @staticmethod
+    def _estimate_stroke_width(mask_arr: np.ndarray) -> float:
+        """Estimate stroke width in pixels via distance transform (p70 × 2)."""
+        binary = (mask_arr > 128).astype(np.uint8)
+        if not np.any(binary):
+            return 0.0
+        dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+        vals = dist[binary > 0]
+        if len(vals) == 0:
+            return 0.0
+        return float(np.percentile(vals, 70)) * 2.0
+
+    @staticmethod
+    def _fit_extreme_flat(
+        mask: Image.Image,
+        cell_w: int,
+        cell_h: int,
+        target_stroke_width: float,
+        orientation: str = "horizontal",
+    ) -> Image.Image:
+        """Reverse-construct layout for extreme-aspect chars (一二三).
+
+        The source mask for chars like 一 is a solid rectangle (the
+        extractor crops to bbox). Simply resizing preserves the solid block.
+
+        Instead: resize the stroke to target dimensions, then center it
+        in a larger canvas to guarantee breathing room above/below.
+        This ensures ink_ratio stays well under 55%.
+        """
+        src_arr = np.array(mask)
+        if not np.any(src_arr > 128):
+            return mask
+
+        src_w, src_h = mask.size
+
+        if orientation == "horizontal":
+            target_length = int(cell_w * 0.70)
+            stroke_h = max(3, int(target_stroke_width))
+            # Canvas 3.5x stroke height for clear breathing room
+            canvas_h = max(int(target_stroke_width * 3.5), int(cell_h * 0.20))
+            canvas_h = min(canvas_h, int(cell_h * 0.50))
+            canvas_w = min(target_length, int(cell_w * 0.90))
+
+            # Resize source to (length × stroke_height)
+            stroke_img = mask.resize(
+                (max(1, canvas_w), max(1, stroke_h)),
+                Image.Resampling.LANCZOS,
+            )
+            # Center stroke in canvas with background padding
+            canvas = Image.new("L", (max(1, canvas_w), max(1, canvas_h)), 0)
+            y_off = (canvas_h - stroke_h) // 2
+            canvas.paste(stroke_img, (0, max(0, y_off)))
+            return canvas
+        else:
+            target_length = int(cell_h * 0.70)
+            stroke_w = max(3, int(target_stroke_width))
+            canvas_w = max(int(target_stroke_width * 3.5), int(cell_w * 0.20))
+            canvas_w = min(canvas_w, int(cell_w * 0.50))
+            canvas_h = min(target_length, int(cell_h * 0.90))
+
+            stroke_img = mask.resize(
+                (max(1, stroke_w), max(1, canvas_h)),
+                Image.Resampling.LANCZOS,
+            )
+            canvas = Image.new("L", (max(1, canvas_w), max(1, canvas_h)), 0)
+            x_off = (canvas_w - stroke_w) // 2
+            canvas.paste(stroke_img, (max(0, x_off), 0))
+            return canvas
+
+    # ── visual centroid ─────────────────────────────────────
+
+    @staticmethod
+    def _centroid_offset(mask: Image.Image) -> tuple[int, int]:
+        """Pixel-weighted centroid offset from bbox geometric center."""
+        arr = np.array(mask)
+        ys, xs = np.where(arr > 128)
+        if len(xs) == 0:
+            return 0, 0
+        cx_px = float(np.mean(xs))
+        cy_px = float(np.mean(ys))
+        cx_geom = (arr.shape[1] - 1) / 2.0
+        cy_geom = (arr.shape[0] - 1) / 2.0
+        return int(round(cx_px - cx_geom)), int(round(cy_px - cy_geom))

@@ -15,7 +15,7 @@ from PIL import Image
 from .extractor import CharExtractor
 from .layout import SealLayout
 from .renderer import SealRenderer
-from .scraper import CalligraphyScraper
+from .scraper import CalligraphyScraper, cache_info, clear_cache
 from .texture import StoneTexture
 
 logger = logging.getLogger(__name__)
@@ -38,8 +38,8 @@ class SealGenerator:
       scraper → extractor → layout → renderer → texture → rotation
     """
 
-    def __init__(self) -> None:
-        self._scraper = CalligraphyScraper()
+    def __init__(self, no_api_cache: bool = False) -> None:
+        self._scraper = CalligraphyScraper(no_api_cache=no_api_cache)
         self._extractor = CharExtractor()
         self._layout = SealLayout()
         self._renderer = SealRenderer()
@@ -105,8 +105,8 @@ class SealGenerator:
         ]
 
         # ── 3. Layout ────────────────────────────────────────
-        ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(shape, size)
-        placements = self._layout.arrange(masks, shape, (ta_w, ta_h))
+        ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(shape, size, style, len(text))
+        placements = self._layout.arrange(masks, shape, (ta_w, ta_h), style)
 
         # Offset placements from text-area-local to canvas-absolute
         for p in placements:

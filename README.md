@@ -20,15 +20,17 @@ Fangcun — Chinese Seal Generator for Geek-Zen
 
 ## 功能
 
-- **朱白文渲染**：白文（红底白字实心填充）、朱文（透明底红字+红框）
+- **朱白文渲染**：白文（红底白字实心填充）、朱文（透明底红字+红框，冲刀破边）
 - **形制选择**：方章、竖椭圆（腰圆章，内圈双线框）
 - **书法字源**：自动从 ygsf.com 抓取篆书/隶书/楷书（优先字典 tab，次选真迹 tab，不用字库）
 - **同源同体**：同一方印章内所有字自动统一书体，并尽量选同一碑帖来源（5级来源统一策略）
 - **简繁自动**：输入简体字自动尝试对应繁体（苏→蘇、轼→軾）
 - **印谱兼容**：自动识别印谱图片（鸟虫篆全书等），三层防御确保极性正确
-- **金石质感**：块状石刻残破、笔画崩边、印泥颗粒感（grain 0→1 从光滑到粗糙）
-- **传统排版**：1–4字自动竖排，列优先从右到左阅读顺序
-- **双入口**：Gradio Web UI（交互）+ CLI（批量自动化）
+- **金石质感**：6层石刻效果——按压不均、框边残破（壳层+断线双路径）、崩边、印泥颗粒、墨池加深、色温微变
+- **智能排版**：1–4字自动竖排，极端扁平字（一二三）反向构造，笔画粗细归一化，视觉重心补偿
+- **朱文冲边**：笔画自动穿过外框线（text_scale=0.98 + 4% bleed），max-alpha 合层融合
+- **三级缓存**：API 响应缓存 + 图片 CDN 缓存 + 选定图缓存，二次生成零网络请求
+- **双入口**：Gradio Web UI（交互）+ CLI（批量自动化 + 缓存管理）
 
 ## 快速开始
 
@@ -53,6 +55,11 @@ python cli.py --text "禅" --shape oval --style baiwen --type leisure
 
 # 批量（每行一个词，用于视频封面流水线）
 python cli.py --batch chars.txt --shape oval --style baiwen --type leisure --output-dir ./seals/
+
+# 缓存管理
+python cli.py --cache-info     # 查看缓存统计（API 正/负缓存数、图片数、磁盘占用）
+python cli.py --clear-cache    # 清除全部缓存
+python cli.py --no-api-cache --text "禅"   # 跳过缓存，强制网络请求
 ```
 
 ### chars.txt 格式
@@ -69,13 +76,13 @@ python cli.py --batch chars.txt --shape oval --style baiwen --type leisure --out
 ```
 core/
 ├── __init__.py      # SealGenerator 统一入口
-├── scraper.py       # ygsf.com 书法字抓取 + 5级来源统一 + 评分选图 + 缓存
+├── scraper.py       # ygsf.com 书法字抓取 + 5级来源统一 + 评分选图 + 3级缓存
 ├── extractor.py     # 三层极性归一化 + 二值化 + 两阶段印谱提取
-├── layout.py        # 传统竖排排版（列优先）
-├── renderer.py      # 白文/朱文渲染
-└── texture.py       # 金石质感滤镜
+├── layout.py        # 5阶段排版：适配 → 检测 → 反向构造 → 笔宽归一 → 重心放置
+├── renderer.py      # 白文蒙版贴图 / 朱文 max-alpha 融合渲染
+└── texture.py       # 6层金石质感滤镜
 app.py               # Gradio Web UI
-cli.py               # CLI 批量入口
+cli.py               # CLI 批量入口 + 缓存管理
 ```
 
 ## 字体选择规则
@@ -109,6 +116,16 @@ cli.py               # CLI 批量入口
 1. **聚合 Alpha CCA**：找到石面连通块，聚合碎片，得到真实边界
 2. **边缘内缩扫描**：从石面边界向内找到连续 3 行不透明区域 = 石面开始，之前的透明通道 = 印框，安全剥离
 
+## 缓存
+
+三级缓存架构，二次生成零网络请求：
+
+| 层级 | 路径 | 内容 | TTL |
+|------|------|------|-----|
+| API 响应 | `~/.seal_gen/cache/_api/` | JSON 字形列表 | 正缓存 30 天，负缓存 7 天 |
+| 图片 CDN | `~/.seal_gen/cache/_img/` | 候选图片 PNG | 无过期 |
+| 选定图 | `~/.seal_gen/cache/{char}_{font}_{tab}.png` | 最终选中图 | 无过期 |
+
 ## 部署
 
 ```bash
@@ -120,7 +137,3 @@ python app.py
 # 2. 上传所有文件
 # 3. 自动构建，获得公开链接
 ```
-
-## 缓存
-
-抓取的书法图片缓存在 `~/.seal_gen/cache/`（含来源元数据），避免重复请求。清除缓存：`rm -rf ~/.seal_gen/cache/`

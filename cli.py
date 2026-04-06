@@ -25,7 +25,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
-from core import SealGenerator
+from core import SealGenerator, cache_info, clear_cache
 
 console = Console()
 
@@ -36,8 +36,8 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # Input mode (mutually exclusive)
-    group = p.add_mutually_exclusive_group(required=True)
+    # Input mode (mutually exclusive; not required when using --cache-info/--clear-cache)
+    group = p.add_mutually_exclusive_group(required=False)
     group.add_argument("--text", type=str, help="印章文字（1–4字）")
     group.add_argument("--batch", type=str, help="批量文件路径（每行一个词）")
 
@@ -78,6 +78,23 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default="./seals",
         help="输出目录 (default: ./seals)",
+    )
+
+    # Cache control
+    p.add_argument(
+        "--no-api-cache",
+        action="store_true",
+        help="跳过 API/图片缓存，强制网络请求",
+    )
+    p.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="清除全部缓存后退出",
+    )
+    p.add_argument(
+        "--cache-info",
+        action="store_true",
+        help="显示缓存统计后退出",
     )
 
     return p.parse_args()
@@ -134,10 +151,29 @@ def main() -> None:
         handlers=[RichHandler(console=console, show_time=False, show_path=False)],
     )
 
+    # ── Cache management commands ────────────────────────────
+    if args.cache_info:
+        info = cache_info()
+        console.print("[bold]缓存统计[/bold]")
+        console.print(f"  API 正缓存: {info['api_positive']} 条")
+        console.print(f"  API 负缓存: {info['api_negative']} 条")
+        console.print(f"  图片缓存:   {info['img_cached']} 张")
+        console.print(f"  总占用:     {info['total_bytes'] / 1024:.1f} KB")
+        return
+
+    if args.clear_cache:
+        n = clear_cache()
+        console.print(f"[green]已清除 {n} 个缓存文件[/green]")
+        return
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    gen = SealGenerator()
+    gen = SealGenerator(no_api_cache=args.no_api_cache)
+
+    if not args.text and not args.batch:
+        console.print("[red]请指定 --text 或 --batch[/red]")
+        sys.exit(1)
 
     if args.text:
         texts = [args.text]

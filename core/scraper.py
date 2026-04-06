@@ -33,6 +33,7 @@ Tab priority (per 金石学 standards):
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -80,6 +81,13 @@ elif os.access(str(Path.home()), os.W_OK):
     CACHE_DIR = Path.home() / ".seal_gen" / "cache"
 else:
     CACHE_DIR = Path("/tmp") / ".seal_gen" / "cache"
+API_CACHE_DIR = CACHE_DIR / "_api"   # JSON responses from _query_glyph_list
+IMG_CACHE_DIR = CACHE_DIR / "_img"   # Downloaded candidate images from CDN
+
+# Cache TTL: glyph data is near-static; negative caches are shorter
+_POSITIVE_TTL_DAYS = 30
+_NEGATIVE_TTL_DAYS = 7
+
 API_BASE = "https://api.ygsf.com/v2.4"
 AES_KEY = b"PkT!ihpN^QkQ62k%"
 
@@ -185,6 +193,84 @@ def _decrypt_response(encrypted_text: str) -> dict:
     return json.loads(plaintext.decode("utf-8"))
 
 
+# ── API / image cache helpers ───────────────────────────────
+
+
+def _api_cache_key(params: dict) -> str:
+    """Stable hash from params dict (pre-encryption)."""
+    blob = json.dumps(params, sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.md5(blob).hexdigest()
+
+
+def _api_cache_path(params: dict) -> Path:
+    return API_CACHE_DIR / f"{_api_cache_key(params)}.json"
+
+
+def _img_cache_path(img_url: str) -> Path:
+    h = hashlib.md5(img_url.encode()).hexdigest()[:16]
+    return IMG_CACHE_DIR / f"{h}.png"
+
+
+def _img_meta_path(img_url: str) -> Path:
+    h = hashlib.md5(img_url.encode()).hexdigest()[:16]
+    return IMG_CACHE_DIR / f"{h}.meta"
+
+
+def _is_cache_fresh(path: Path, ttl_days: int) -> bool:
+    """Check if a cache file exists and is within TTL."""
+    if not path.exists():
+        return False
+    age_s = time.time() - path.stat().st_mtime
+    return age_s < ttl_days * 86400
+
+
+def cache_info() -> dict[str, int]:
+    """Return cache statistics: counts and total disk usage."""
+    api_pos = api_neg = img_count = 0
+    total_bytes = 0
+
+    if API_CACHE_DIR.exists():
+        for f in API_CACHE_DIR.iterdir():
+            if f.suffix != ".json":
+                continue
+            total_bytes += f.stat().st_size
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if data.get("_empty"):
+                    api_neg += 1
+                else:
+                    api_pos += 1
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    if IMG_CACHE_DIR.exists():
+        for f in IMG_CACHE_DIR.iterdir():
+            if f.suffix == ".png":
+                img_count += 1
+                total_bytes += f.stat().st_size
+
+    return {
+        "api_positive": api_pos,
+        "api_negative": api_neg,
+        "img_cached": img_count,
+        "total_bytes": total_bytes,
+    }
+
+
+def clear_cache() -> int:
+    """Remove all cache files. Returns number of files removed."""
+    count = 0
+    for d in (API_CACHE_DIR, IMG_CACHE_DIR):
+        if d.exists():
+            for f in d.iterdir():
+                try:
+                    f.unlink()
+                    count += 1
+                except OSError:
+                    pass
+    return count
+
+
 # ── Main class ───────────────────────────────────────────────
 
 
@@ -196,9 +282,12 @@ class CalligraphyScraper:
         "name": ["隶", "楷"],
     }
 
-    def __init__(self) -> None:
+    def __init__(self, no_api_cache: bool = False) -> None:
         self._session = requests.Session()
+        self._no_api_cache = no_api_cache
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        API_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        IMG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     def fetch_chars_consistent(
         self, text: str, seal_type: str
@@ -606,7 +695,13 @@ class CalligraphyScraper:
     def _query_glyph_list(
         self, char: str, font_style: str, tab_type: int
     ) -> list[dict]:
-        """Query ygsf API, return raw glyph list (no image download)."""
+        """Query ygsf API, return raw glyph list (no image download).
+
+        Cache layer (inserted before sleep/encrypt for zero-latency hits):
+          - Positive cache: 30-day TTL (glyph data rarely changes)
+          - Negative cache: 7-day TTL (cold chars won't suddenly appear)
+          - Key: MD5 of stable params dict (not encrypted blob)
+        """
         params = {
             "key": char,
             "kind": 1,
@@ -621,6 +716,27 @@ class CalligraphyScraper:
             "_brand": "",
             "_token": "",
         }
+
+        # ── Cache check (before sleep/encrypt) ──────────────
+        if not self._no_api_cache:
+            cp = _api_cache_path(params)
+            pos_fresh = _is_cache_fresh(cp, _POSITIVE_TTL_DAYS)
+            neg_fresh = _is_cache_fresh(cp, _NEGATIVE_TTL_DAYS)
+            if pos_fresh or neg_fresh:
+                try:
+                    cached = json.loads(cp.read_text(encoding="utf-8"))
+                    if cached.get("_empty"):
+                        if neg_fresh:
+                            logger.debug("API negative cache hit: %s/%s/tab%d", char, font_style, tab_type)
+                            return []
+                    else:
+                        if pos_fresh:
+                            logger.debug("API cache hit: %s/%s/tab%d (%d items)", char, font_style, tab_type, len(cached.get("list", [])))
+                            return cached.get("list", [])
+                except (json.JSONDecodeError, OSError):
+                    cp.unlink(missing_ok=True)
+
+        # ── Network fetch ───────────────────────────────────
         encrypted = _encrypt_params(params)
 
         for attempt in range(3):
@@ -643,9 +759,13 @@ class CalligraphyScraper:
                 data = _decrypt_response(resp.text)
 
                 if data.get("stat") != 0:
+                    # Negative cache: record empty result
+                    self._write_api_cache(params, None)
                     return []
 
-                return data.get("data", {}).get("list", [])
+                glyph_list = data.get("data", {}).get("list", [])
+                self._write_api_cache(params, glyph_list)
+                return glyph_list
 
             except requests.RequestException as exc:
                 wait = (2**attempt) + random.uniform(0, 1)
@@ -658,6 +778,30 @@ class CalligraphyScraper:
                 time.sleep(wait)
 
         return []
+
+    @staticmethod
+    def _write_api_cache(params: dict, glyph_list: Optional[list[dict]]) -> None:
+        """Atomic write of API response cache (positive or negative)."""
+        import tempfile as _tf
+
+        cp = _api_cache_path(params)
+        if glyph_list is None or len(glyph_list) == 0:
+            payload = {"_empty": True, "ts": time.time()}
+        else:
+            payload = {"list": glyph_list, "ts": time.time()}
+        try:
+            fd, tmp = _tf.mkstemp(dir=cp.parent, suffix=".tmp")
+            os.close(fd)
+            Path(tmp).write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            os.replace(tmp, cp)
+        except OSError as exc:
+            logger.debug("API cache write failed: %s", exc)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     def _fetch_from_web(
         self, char: str, font_style: str, tab_type: int
@@ -708,7 +852,12 @@ class CalligraphyScraper:
     def _download_scored_candidates(
         self, glyph_list: list[dict], max_n: int = 5
     ) -> list[tuple[Image.Image, float, str]]:
-        """Download up to max_n candidates, score each. Returns [(img, score, source_name), ...]."""
+        """Download up to max_n candidates, score each.
+
+        Image CDN cache: each URL → MD5-hashed .png + .meta (source_name).
+        Cache hit skips HTTP GET entirely.
+        Returns [(img, score, source_name), ...] sorted by score desc.
+        """
         candidates: list[tuple[Image.Image, float, str]] = []
 
         for glyph in glyph_list:
@@ -722,6 +871,33 @@ class CalligraphyScraper:
             if "x-bce-process=" in img_url:
                 img_url = img_url.split("?")[0]
 
+            src = glyph.get("_from", "?")
+
+            # ── Image CDN cache check ───────────────────────
+            icp = _img_cache_path(img_url)
+            if not self._no_api_cache and icp.exists():
+                try:
+                    img = Image.open(icp)
+                    img.load()
+                    # Read cached source_name if available
+                    imp = _img_meta_path(img_url)
+                    if imp.exists():
+                        src = imp.read_text(encoding="utf-8").strip() or src
+
+                    if min(img.width, img.height) < self._MIN_RESOLUTION:
+                        continue
+
+                    score = self._score_image(img, src)
+                    candidates.append((img, score, src))
+                    logger.debug(
+                        "IMG cache hit: %dx%d score=%.1f from=%s",
+                        img.width, img.height, score, src,
+                    )
+                    continue
+                except (OSError, IOError):
+                    icp.unlink(missing_ok=True)
+
+            # ── HTTP download ───────────────────────────────
             try:
                 img_resp = self._session.get(
                     img_url,
@@ -735,7 +911,9 @@ class CalligraphyScraper:
                 if min(img.width, img.height) < self._MIN_RESOLUTION:
                     continue
 
-                src = glyph.get("_from", "?")
+                # Save to image cache (atomic)
+                self._write_img_cache(img_url, img, src)
+
                 score = self._score_image(img, src)
                 candidates.append((img, score, src))
                 logger.debug(
@@ -749,6 +927,27 @@ class CalligraphyScraper:
 
         candidates.sort(key=lambda c: c[1], reverse=True)
         return candidates
+
+    @staticmethod
+    def _write_img_cache(img_url: str, img: Image.Image, src: str) -> None:
+        """Atomic write of image CDN cache."""
+        import tempfile as _tf
+
+        icp = _img_cache_path(img_url)
+        try:
+            fd, tmp = _tf.mkstemp(dir=icp.parent, suffix=".tmp")
+            os.close(fd)
+            img.save(tmp, "PNG")
+            os.replace(tmp, icp)
+            # Write source metadata
+            imp = _img_meta_path(img_url)
+            imp.write_text(src, encoding="utf-8")
+        except OSError as exc:
+            logger.debug("IMG cache write failed: %s", exc)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     def _download_best_image(
         self, glyph_list: list[dict]

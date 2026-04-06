@@ -123,12 +123,16 @@ class SealRenderer:
         w: int,
         h: int,
     ) -> Image.Image:
-        """Transparent background with red frame and red text."""
-        canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        """Transparent background with red frame and red text.
+
+        Chars and frame are rendered to separate alpha layers then merged
+        via max-alpha so bleeding chars and frame lines fuse naturally
+        (冲刀破边 effect).
+        """
         rgba_color = (*color, 255)
 
-        # Draw frame
-        frame_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        # ── Frame alpha layer ───────────────────────────────
+        frame_layer = Image.new("L", (w, h), 0)
         frame_draw = ImageDraw.Draw(frame_layer)
 
         if shape == "oval":
@@ -140,39 +144,65 @@ class SealRenderer:
             m1 = outer_lw // 2 + 2
             frame_draw.ellipse(
                 [m1, m1, w - m1 - 1, h - m1 - 1],
-                outline=rgba_color,
+                fill=None, outline=255,
                 width=outer_lw,
             )
             m2 = m1 + outer_lw + gap
             frame_draw.ellipse(
                 [m2, m2, w - m2 - 1, h - m2 - 1],
-                outline=rgba_color,
+                fill=None, outline=255,
                 width=inner_lw,
             )
         else:
-            # Square: single-line frame
             border_w = max(2, round(w * 0.018))
             p = border_w // 2 + 1
             frame_draw.rectangle(
                 [p, p, w - p - 1, h - p - 1],
-                outline=rgba_color,
+                fill=None, outline=255,
                 width=border_w,
             )
 
-        canvas = Image.alpha_composite(canvas, frame_layer)
+        frame_alpha = np.array(frame_layer)
 
-        # Paste characters in seal color
+        # ── Character alpha layer ───────────────────────────
+        char_alpha = np.zeros((h, w), dtype=np.uint8)
         for item in layout:
             mask = item["img"]
             x, y = item["x"], item["y"]
             target_w, target_h = item["w"], item["h"]
 
-            resized_mask = mask.resize(
-                (target_w, target_h), Image.Resampling.LANCZOS
+            resized = np.array(
+                mask.resize((target_w, target_h), Image.Resampling.LANCZOS)
             )
-            color_layer = Image.new("RGBA", (target_w, target_h), rgba_color)
-            color_layer.putalpha(resized_mask)
-            canvas.paste(color_layer, (x, y), mask=color_layer)
+
+            # Clip to canvas bounds
+            src_y0 = max(0, -y)
+            src_x0 = max(0, -x)
+            dst_y0 = max(0, y)
+            dst_x0 = max(0, x)
+            src_y1 = min(target_h, h - y)
+            src_x1 = min(target_w, w - x)
+            if src_y1 <= src_y0 or src_x1 <= src_x0:
+                continue
+
+            region = resized[src_y0:src_y1, src_x0:src_x1]
+            char_alpha[dst_y0 : dst_y0 + region.shape[0],
+                       dst_x0 : dst_x0 + region.shape[1]] = np.maximum(
+                char_alpha[dst_y0 : dst_y0 + region.shape[0],
+                           dst_x0 : dst_x0 + region.shape[1]],
+                region,
+            )
+
+        # ── Merge: max alpha (chars + frame fuse at bleed points) ──
+        merged_alpha = np.maximum(frame_alpha, char_alpha)
+
+        canvas_arr = np.zeros((h, w, 4), dtype=np.uint8)
+        canvas_arr[:, :, 0] = color[0]
+        canvas_arr[:, :, 1] = color[1]
+        canvas_arr[:, :, 2] = color[2]
+        canvas_arr[:, :, 3] = merged_alpha
+
+        canvas = Image.fromarray(canvas_arr, "RGBA")
 
         # Apply shape mask
         canvas = self._apply_shape_mask(canvas, shape, w, h)
@@ -211,10 +241,17 @@ class SealRenderer:
         return size, size
 
     @staticmethod
-    def text_area(shape: str, size: int) -> tuple[int, int, int, int]:
+    def text_area(
+        shape: str, size: int, style: str = "baiwen", char_count: int = 2
+    ) -> tuple[int, int, int, int]:
         """
         Return (x, y, w, h) of the text area inside the frame.
         Coordinates are relative to the canvas origin.
+
+        text_scale varies by style and char_count:
+          - zhuwen:          0.98 (near frame for bleed)
+          - baiwen, 1 char:  0.93 (顶天立地 fill)
+          - baiwen, 2+ chars: 0.86 (leave red border)
         """
         w, h = SealRenderer.canvas_dimensions(shape, size)
         s = min(w, h)
@@ -227,7 +264,12 @@ class SealRenderer:
         else:
             frame_total = max(2, round(w * 0.018)) + 2
 
-        text_scale = 0.78
+        if style == "zhuwen":
+            text_scale = 0.98
+        elif char_count == 1:
+            text_scale = 0.93
+        else:
+            text_scale = 0.86
         area_w = int((w - 2 * frame_total) * text_scale)
         area_h = int((h - 2 * frame_total) * text_scale)
         area_x = (w - area_w) // 2
