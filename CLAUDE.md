@@ -56,6 +56,10 @@ Resolution (0–30) + contrast (0–50) + coverage (0–20), then penalties:
 
 When `len(set(text)) == 1` (禅, 朝朝), skip Pass 2 unified source check entirely. Use `_fetch_all_candidates(n=15)` with preferred source tie-break: within ±5 of top score, prefer `PREFERRED_INSCRIPTION_SOURCES` (中国篆刻大字典, 汉印文字征 series, etc.) over calligrapher personal dictionaries.
 
+### Stroke-width sibling match (R12)
+
+When `_try_unified_source_from_candidates` picks a unified source that has multiple variants for one char (e.g. 中国篆刻大字典 ships both a thin and a thick 知), the default "first-per-source" rule can pair a thin 知 with a thick 足 and produce visual imbalance. R12 fixes this: after `best_source` is chosen, collect the relative stroke width (`p70 × 2 / min_dim`) of each **unambiguous** sibling (only one eligible variant within ±5 score of its top) as the anchor. For each ambiguous char, pick the variant whose relative stroke width is closest to the anchor median. Falls back to median of top variants if every sibling is ambiguous. Logged as `[R12] 笔画匹配`.
+
 ### Three-tier cache
 
 - Tier 1: API response JSON (`_api/`) — MD5 key, 30d/7d TTL
@@ -115,7 +119,7 @@ SealGenerator.generate()
     → [single-char short-circuit with preferred source tie-break]
     → _query_glyph_list()                  # API cache → web
     → _fetch_all_candidates(n=5/10)       # image CDN cache → download
-    → _try_unified_source_from_candidates # Level 1-2
+    → _try_unified_source_from_candidates # Level 1-2 + R12 stroke-width match
     → _majority_source_fallback           # Level 3
     → _min_style_loss_fallback            # Level 4
   → extractor.extract(img, tab, source_name)

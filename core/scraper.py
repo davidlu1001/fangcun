@@ -574,14 +574,21 @@ class CalligraphyScraper:
         font_style: str,
         all_cands: dict[str, list[tuple[Image.Image, float, str, str]]],
     ) -> Optional[tuple[list[Image.Image], list[str], list[str], str]]:
-        """Find a single source covering ALL characters. Returns tuple or None."""
-        # Group by source per character
-        char_by_source: dict[str, dict[str, tuple[Image.Image, float, str]]] = {}
+        """Find a single source covering ALL characters. Returns tuple or None.
+
+        R12: When a source has multiple variants for a char (e.g. 中国篆刻大字典
+        has both thin and thick 知), pick the variant whose relative stroke
+        width best matches the sibling median. This prevents visual imbalance
+        when siblings share a source but differ in line weight (知足 case).
+        """
+        # Group ALL variants per source per char (score-desc order preserved)
+        char_by_source: dict[
+            str, dict[str, list[tuple[Image.Image, float, str]]]
+        ] = {}
         for char in text:
-            by_src: dict[str, tuple[Image.Image, float, str]] = {}
+            by_src: dict[str, list[tuple[Image.Image, float, str]]] = {}
             for img, score, src, tab in all_cands.get(char, []):
-                if src not in by_src:
-                    by_src[src] = (img, score, tab)
+                by_src.setdefault(src, []).append((img, score, tab))
             if not by_src:
                 return None
             char_by_source[char] = by_src
@@ -596,21 +603,92 @@ class CalligraphyScraper:
             logger.info("无统一来源 (字: %s)", ", ".join(text))
             return None
 
-        # Best common source by average score
+        # Best common source by average top-variant score
         best_source = max(
             common,
-            key=lambda src: sum(char_by_source[c][src][1] for c in text) / len(text),
+            key=lambda src: sum(
+                char_by_source[c][src][0][1] for c in text
+            ) / len(text),
         )
 
-        images, tabs_, src_names = [], [], []
+        # ── R12: stroke-width sibling tie-break ─────────────────
+        # When a char has multiple variants within ±5 score of its top
+        # (ambiguous: e.g. 知 has both thin sw=22 and thick sw=88 in
+        # 中国篆刻大字典), pick the variant whose relative stroke width best
+        # matches an anchor computed from UNAMBIGUOUS siblings. Unambiguous
+        # = only one eligible variant in best_source, so its stroke width
+        # is a trustworthy anchor. If all siblings are ambiguous, fall
+        # back to median of top variants.
+        eligible_per_char: list[list[tuple[Image.Image, float, str]]] = []
         for char in text:
-            img, score, tab = char_by_source[char][best_source]
+            variants = char_by_source[char][best_source]
+            top_score = variants[0][1]
+            elig = [v for v in variants if v[1] >= top_score - 5.0]
+            eligible_per_char.append(elig)
+
+        anchor_sws = [
+            self._relative_stroke_width(elig[0][0])
+            for elig in eligible_per_char
+            if len(elig) == 1
+        ]
+        if not anchor_sws:
+            anchor_sws = [
+                self._relative_stroke_width(elig[0][0])
+                for elig in eligible_per_char
+            ]
+        target_sw = float(np.median(anchor_sws)) if anchor_sws else 0.0
+
+        images, tabs_, src_names = [], [], []
+        for char, eligible in zip(text, eligible_per_char):
+            if len(eligible) > 1 and target_sw > 0:
+                chosen = min(
+                    eligible,
+                    key=lambda v: abs(
+                        self._relative_stroke_width(v[0]) - target_sw
+                    ),
+                )
+                if chosen is not eligible[0]:
+                    logger.info(
+                        "[R12] 笔画匹配 '%s' (%s): top rel_sw=%.3f → 选 rel_sw=%.3f (target=%.3f)",
+                        char, best_source,
+                        self._relative_stroke_width(eligible[0][0]),
+                        self._relative_stroke_width(chosen[0]),
+                        target_sw,
+                    )
+            else:
+                chosen = eligible[0]
+
+            img, score, tab = chosen
             images.append(img)
             tabs_.append(tab)
             src_names.append(best_source)
             self._save_cache(char, font_style, tab, img, best_source)
 
         return images, tabs_, src_names, best_source
+
+    @staticmethod
+    def _relative_stroke_width(img: Image.Image) -> float:
+        """Stroke width as a fraction of the image short side.
+
+        Uses distance-transform p70 × 2 on dark pixels (strokes are dark in
+        raw scraper images). Normalizing by short side makes the metric
+        resolution-independent so thin/thick variants can be compared across
+        candidates that arrive at different pixel dimensions.
+        """
+        arr = np.array(img.convert("L"))
+        binary = (arr < 128).astype(np.uint8)
+        if binary.sum() < 10:
+            return 0.0
+        dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+        vals = dist[binary > 0]
+        if len(vals) == 0:
+            return 0.0
+        sw = float(np.percentile(vals, 70)) * 2.0
+        short_side = min(img.width, img.height)
+        if short_side <= 0:
+            return 0.0
+        # Clip pathological overflow (seen on tiny/degenerate masks)
+        return min(sw, float(short_side)) / float(short_side)
 
     def _majority_source_fallback(
         self,
@@ -955,6 +1033,7 @@ class CalligraphyScraper:
             payload = {"_empty": True, "ts": time.time()}
         else:
             payload = {"list": glyph_list, "ts": time.time()}
+        tmp: Optional[str] = None
         try:
             fd, tmp = _tf.mkstemp(dir=cp.parent, suffix=".tmp")
             os.close(fd)
@@ -964,10 +1043,11 @@ class CalligraphyScraper:
             os.replace(tmp, cp)
         except OSError as exc:
             logger.debug("API cache write failed: %s", exc)
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            if tmp is not None:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     def _fetch_from_web(
         self, char: str, font_style: str, tab_type: int
@@ -1129,6 +1209,7 @@ class CalligraphyScraper:
         import tempfile as _tf
 
         icp = _img_cache_path(img_url)
+        tmp: Optional[str] = None
         try:
             fd, tmp = _tf.mkstemp(dir=icp.parent, suffix=".tmp")
             os.close(fd)
@@ -1139,10 +1220,11 @@ class CalligraphyScraper:
             imp.write_text(src, encoding="utf-8")
         except OSError as exc:
             logger.debug("IMG cache write failed: %s", exc)
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            if tmp is not None:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     def _download_best_image(
         self, glyph_list: list[dict]
@@ -1373,6 +1455,7 @@ class CalligraphyScraper:
 
         path = CalligraphyScraper._cache_path(char, font_style, tab_name)
         path.parent.mkdir(parents=True, exist_ok=True)
+        tmp: Optional[str] = None
         try:
             fd, tmp = _tf.mkstemp(dir=path.parent, suffix=".tmp")
             os.close(fd)
@@ -1383,7 +1466,8 @@ class CalligraphyScraper:
                 meta.write_text(source_name, encoding="utf-8")
         except (OSError, IOError) as exc:
             logger.warning("Cache write failed: %s", exc)
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            if tmp is not None:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
