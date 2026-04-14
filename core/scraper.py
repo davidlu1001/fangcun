@@ -129,6 +129,17 @@ AES_KEY = b"PkT!ihpN^QkQ62k%"
 # (the case R12 was designed to fix).
 R12_STROKE_DEVIATION_WARN = 0.20
 
+# R12 adaptive eligibility-window expansion. The default ±5 score window keeps
+# variant selection conservative — but for some chars (e.g., 宙 in 中国篆刻大字典)
+# the only ±5-eligible variant has a stroke width far from the sibling target,
+# while a slightly lower-scoring variant (Δ=10-15) matches the target almost
+# perfectly. When the best ±5 pick still deviates beyond _R12_DEVIATION_OK,
+# expand to the next tier; cascade through the list. Last tier is always tried.
+# Trade-off: lower-scoring variants are usually "less popular", not "lower
+# image quality" (R8-A et al. already filter out fragmented/noisy candidates).
+_R12_WINDOW_TIERS = (5.0, 15.0, 25.0)
+_R12_DEVIATION_OK = 0.20  # accept if chosen variant deviates ≤ this from target
+
 # R12 anchor eligibility: chars with extreme aspect ratios (一, 三 → wide;
 # tall narrow chars → vertical) have rel_sw ≈ 1.0 because the whole image
 # IS the stroke. Including them in the anchor median poisons the target and
@@ -651,19 +662,39 @@ class CalligraphyScraper:
         )
 
         # ── R12: stroke-width sibling tie-break ─────────────────
-        # When a char has multiple variants within ±5 score of its top
-        # (ambiguous: e.g. 知 has both thin sw=22 and thick sw=88 in
-        # 中国篆刻大字典), pick the variant whose relative stroke width best
-        # matches an anchor computed from UNAMBIGUOUS siblings. Unambiguous
-        # = only one eligible variant in best_source, so its stroke width
-        # is a trustworthy anchor. If all siblings are ambiguous, fall
-        # back to median of top variants.
-        eligible_per_char: list[list[tuple[Image.Image, float, str]]] = []
+        # Two-stage selection with TWO POOLS:
+        #
+        #   (a) ANCHOR pool — uses the ORIGINAL Pass 1 candidate pool (n=5
+        #       passed in via all_cands). Stays narrow on purpose: anchor
+        #       should reflect "what the source clearly offers as its best
+        #       output", which is exactly what the n=5 top variants are.
+        #       Enriching the anchor pool would inflate ambiguity and shift
+        #       target_sw toward outlier top variants (the bug we hit when
+        #       the top variant of one char is unrepresentatively thick/thin).
+        #
+        #   (b) PICKING pool — refetched with n=15 for best_source only.
+        #       Pass 1's n=5 may return only 1 variant per source for some
+        #       chars (e.g., 宙/中国篆刻大字典 only has rel_sw=0.038 in n=5,
+        #       but n=15 unlocks the rel_sw=0.060 variant that matches
+        #       target_sw=0.062 almost exactly). R12 picks against this
+        #       richer pool using adaptive window expansion (±5 → ±15 → ±25).
+        anchor_eligible_per_char: list[list[tuple[Image.Image, float, str]]] = []
         for char in text:
-            variants = char_by_source[char][best_source]
+            variants = char_by_source[char][best_source]  # original n=5 pool
             top_score = variants[0][1]
-            elig = [v for v in variants if v[1] >= top_score - 5.0]
-            eligible_per_char.append(elig)
+            elig = [v for v in variants if v[1] >= top_score - _R12_WINDOW_TIERS[0]]
+            anchor_eligible_per_char.append(elig)
+
+        # Picking pool: enriched per-char variants in best_source (n=15)
+        char_variants_in_best: dict[str, list[tuple[Image.Image, float, str]]] = {}
+        for char in text:
+            wide = self._fetch_all_candidates(
+                char, font_style, n=15,
+                exclude_decorative=(self._current_seal_type == "name"),
+            )
+            in_source = [(img, score, tab) for img, score, src, tab in wide if src == best_source]
+            # Fall back to the n=5 pool if the n=15 query somehow returns nothing
+            char_variants_in_best[char] = in_source or char_by_source[char][best_source]
 
         # Anchor pool: prefer unambiguous siblings (only one eligible variant),
         # and exclude extreme-aspect chars (一, 三, etc.) whose rel_sw ≈ 1.0
@@ -671,43 +702,45 @@ class CalligraphyScraper:
         # text="一" (only extreme chars exist).
         anchor_sws = [
             self._relative_stroke_width(elig[0][0])
-            for elig in eligible_per_char
+            for elig in anchor_eligible_per_char
             if len(elig) == 1 and self._is_anchor_eligible(elig[0][0])
         ]
         if not anchor_sws:
             # Relax the unambiguous requirement, keep the extreme-aspect filter
             anchor_sws = [
                 self._relative_stroke_width(elig[0][0])
-                for elig in eligible_per_char
+                for elig in anchor_eligible_per_char
                 if self._is_anchor_eligible(elig[0][0])
             ]
         if not anchor_sws:
             # Only extreme chars exist (e.g. text="一一") — use them anyway
             anchor_sws = [
                 self._relative_stroke_width(elig[0][0])
-                for elig in eligible_per_char
+                for elig in anchor_eligible_per_char
             ]
         target_sw = float(np.median(anchor_sws)) if anchor_sws else 0.0
 
         images, tabs_, src_names = [], [], []
-        for char, eligible in zip(text, eligible_per_char):
-            if len(eligible) > 1 and target_sw > 0:
-                chosen = min(
-                    eligible,
-                    key=lambda v: abs(
-                        self._relative_stroke_width(v[0]) - target_sw
-                    ),
+        for char in text:
+            variants = char_variants_in_best[char]
+            top_score = variants[0][1]
+
+            if target_sw > 0 and len(variants) > 1:
+                chosen, used_window = self._adaptive_pick(
+                    variants, top_score, target_sw,
                 )
-                if chosen is not eligible[0]:
+                top_sw = self._relative_stroke_width(variants[0][0])
+                chosen_sw = self._relative_stroke_width(chosen[0])
+                if chosen is not variants[0]:
                     logger.info(
-                        "[R12] 笔画匹配 '%s' (%s): top rel_sw=%.3f → 选 rel_sw=%.3f (target=%.3f)",
-                        char, best_source,
-                        self._relative_stroke_width(eligible[0][0]),
-                        self._relative_stroke_width(chosen[0]),
-                        target_sw,
+                        "[R12] 笔画匹配 '%s' (%s, window±%.0f): "
+                        "top rel_sw=%.3f → 选 rel_sw=%.3f (target=%.3f, Δscore=%.1f)",
+                        char, best_source, used_window,
+                        top_sw, chosen_sw, target_sw,
+                        top_score - chosen[1],
                     )
             else:
-                chosen = eligible[0]
+                chosen = variants[0]
 
             img, score, tab = chosen
             images.append(img)
@@ -752,6 +785,41 @@ class CalligraphyScraper:
             return False
         aspect = w / h
         return _R12_EXTREME_ASPECT_LO <= aspect <= _R12_EXTREME_ASPECT_HI
+
+    def _adaptive_pick(
+        self,
+        variants: list[tuple[Image.Image, float, str]],
+        top_score: float,
+        target_sw: float,
+    ) -> tuple[tuple[Image.Image, float, str], float]:
+        """Pick the variant whose rel_sw is closest to target_sw, expanding
+        the score-eligibility window until deviation ≤ _R12_DEVIATION_OK.
+
+        Cascades through _R12_WINDOW_TIERS (e.g., ±5 → ±15 → ±25). Stops at
+        the first tier that yields a within-tolerance match. If no tier
+        satisfies, returns the closest match from the widest tier.
+
+        Variants must be sorted by score descending (the scraper guarantees
+        this; we don't re-sort).
+
+        Returns (chosen_variant, used_window_delta).
+        """
+        chosen = variants[0]
+        used_window = _R12_WINDOW_TIERS[-1]
+        for max_delta in _R12_WINDOW_TIERS:
+            elig = [v for v in variants if v[1] >= top_score - max_delta]
+            if not elig:
+                continue
+            candidate = min(
+                elig,
+                key=lambda v: abs(self._relative_stroke_width(v[0]) - target_sw),
+            )
+            chosen = candidate
+            used_window = max_delta
+            cand_sw = self._relative_stroke_width(candidate[0])
+            if abs(cand_sw - target_sw) / target_sw <= _R12_DEVIATION_OK:
+                break
+        return chosen, used_window
 
     @staticmethod
     def _relative_stroke_width(img: Image.Image) -> float:

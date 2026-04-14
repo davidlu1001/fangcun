@@ -96,3 +96,77 @@ class TestAnchorEligibility:
         img = Image.new("L", (100, 1), 255)
         # width 100, height 1 → aspect 100 → extreme, excluded
         assert CalligraphyScraper._is_anchor_eligible(img) is False
+
+
+def _stroke_img(thickness: int) -> Image.Image:
+    """Build a 200x200 image with a centered horizontal stroke of given thickness."""
+    arr = np.full((200, 200), 255, dtype=np.uint8)
+    half = thickness // 2
+    arr[100 - half : 100 + half, 20:180] = 0
+    return Image.fromarray(arr, "L")
+
+
+@pytest.mark.unit
+class TestAdaptivePick:
+    """Verify the adaptive R12 window-expansion picker.
+
+    Reproduces the 宇宙洪荒 / 中国篆刻大字典 case where the only ±5-eligible
+    variant has rel_sw far from target_sw, but a Δ=10-15 lower-scoring
+    variant matches almost perfectly. Adaptive expansion finds it.
+    """
+
+    def setup_method(self) -> None:
+        self.scraper = CalligraphyScraper()
+
+    def test_picks_within_tight_window_when_match_exists(self) -> None:
+        """If a ±5 variant already matches target, no expansion needed."""
+        # Three variants: thin/medium/thick, all in ±5 score window
+        variants = [
+            (_stroke_img(40), 100.0, "字典"),  # thick — top
+            (_stroke_img(20), 98.0, "字典"),   # medium
+            (_stroke_img(8),  97.0, "字典"),   # thin
+        ]
+        target_sw = self.scraper._relative_stroke_width(_stroke_img(20))
+        chosen, window = self.scraper._adaptive_pick(variants, top_score=100.0, target_sw=target_sw)
+        # Should pick the medium one (matches target exactly), not top (thick)
+        assert chosen[1] == 98.0, f"Should pick medium (98.0), got score {chosen[1]}"
+        assert window == 5.0, f"Should not expand window, got {window}"
+
+    def test_expands_window_when_tight_misses(self) -> None:
+        """When ±5 has only a poor match, expand to ±15 to find a better one."""
+        # Top variant is thick. Only ±5 candidate. A medium variant exists at Δ=12.
+        # 宇宙洪荒/宙 case: top=100 rel_sw=0.129, target=0.062, real best at score=88.1 (Δ=11.9, rel_sw=0.060).
+        variants = [
+            (_stroke_img(60), 100.0, "字典"),  # thick (only ±5 candidate)
+            (_stroke_img(20), 88.0, "字典"),   # medium (Δ=12, matches target)
+            (_stroke_img(10), 80.0, "字典"),   # thin (Δ=20)
+        ]
+        target_sw = self.scraper._relative_stroke_width(_stroke_img(20))
+        chosen, window = self.scraper._adaptive_pick(variants, top_score=100.0, target_sw=target_sw)
+        assert chosen[1] == 88.0, (
+            f"Should expand to ±15 and pick the medium variant (88.0), got {chosen[1]}"
+        )
+        assert window == 15.0, f"Should have expanded to ±15, got {window}"
+
+    def test_falls_through_to_widest_window_when_none_satisfy(self) -> None:
+        """When no variant gets within deviation threshold, return widest-window best."""
+        # All variants are far from target (target=very-thin, all variants thick)
+        variants = [
+            (_stroke_img(60), 100.0, "字典"),
+            (_stroke_img(50), 90.0, "字典"),
+            (_stroke_img(40), 80.0, "字典"),
+        ]
+        # target is way off — synthetic stroke not in any variant
+        target_sw = 0.001
+        chosen, window = self.scraper._adaptive_pick(variants, top_score=100.0, target_sw=target_sw)
+        # Should fall through to the widest tier
+        assert window == 25.0, f"Should reach widest tier, got {window}"
+        # Should pick the closest available (smallest stroke) — 40
+        assert chosen[1] == 80.0, f"Should pick smallest stroke (80.0), got {chosen[1]}"
+
+    def test_single_variant_returns_unchanged(self) -> None:
+        """One-element list: no choice, return it."""
+        variants = [(_stroke_img(20), 100.0, "字典")]
+        target_sw = 0.01
+        chosen, _ = self.scraper._adaptive_pick(variants, top_score=100.0, target_sw=target_sw)
+        assert chosen[1] == 100.0
