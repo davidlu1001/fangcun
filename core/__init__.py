@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -166,6 +167,60 @@ class SealGenerator:
             "consistency_level": consistency_level,
             "source_names": list(source_names),
         }
+
+    # ── Public debug API ────────────────────────────────────
+    #
+    # These methods expose debug hooks without forcing callers (CLI, tests)
+    # to reach into private attributes. Backwards-compatible: the underlying
+    # `_extractor.debug_dir` attribute still works for legacy callers.
+
+    def set_extract_debug_dir(self, path: Path | None) -> None:
+        """Enable/disable saving extractor intermediate stages.
+
+        When `path` is set, every extract() call saves intermediate PNGs:
+          01_normalized.png, 02_binary.png, 03_denoised.png, 04_cropped.png
+
+        Multi-char seals overwrite into the same dir — only the last char's
+        intermediates remain. Set to None to disable.
+        """
+        self._extractor.debug_dir = path
+
+    def render_layout_debug(
+        self,
+        text: str,
+        shape: str = "oval",
+        style: str = "baiwen",
+        seal_type: str = "leisure",
+        size: int = 600,
+    ) -> Image.Image:
+        """Render a debug overlay (cells / ink bboxes / centroids) for the layout
+        that the same parameters would produce.
+
+        This re-runs the scraper + extractor + layout pipeline (re-fetching
+        from cache; no extra network) but skips renderer/texture/rotation.
+        Re-running the pipeline is an acceptable trade-off for debug-only use.
+        Returns an RGBA image at canvas dimensions with:
+          - Blue rectangles: cell boundaries
+          - Red rectangles: ink bounding boxes
+          - Green dots: pixel-weighted centroids
+
+        Use cases: debugging layout phase decisions (extreme-aspect handling,
+        centroid offsets, cell vs ink overflow).
+        """
+        raw_images, _, _, tab_sources, source_names, _ = (
+            self._scraper.fetch_chars_consistent(text, seal_type)
+        )
+        masks = [
+            self._extractor.extract(img, source=tab, source_name=src)
+            for img, tab, src in zip(raw_images, tab_sources, source_names)
+        ]
+        ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(shape, size, style, len(text))
+        placements = self._layout.arrange(masks, shape, (ta_w, ta_h), style)
+        for p in placements:
+            p["x"] += ta_x
+            p["y"] += ta_y
+        canvas_w, canvas_h = SealRenderer.canvas_dimensions(shape, size)
+        return self._layout.debug_render(placements, (canvas_w, canvas_h))
 
 
 def _hex_to_rgb(hex_str: str) -> tuple[int, int, int]:

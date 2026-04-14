@@ -121,3 +121,25 @@ class TestExtractorDebugMode:
 
         # tmp_path should be empty
         assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.unit
+class TestSealGeneratorPublicDebugAPI:
+    """Public debug-mode setters on SealGenerator.
+
+    These tests verify the CONTRACT of the public API by asserting on the
+    private attribute it should propagate to. That's legitimate — tests can
+    reach into internals to verify public-method correctness.
+    """
+
+    def test_set_extract_debug_dir_propagates(self, tmp_path) -> None:
+        from core import SealGenerator
+        gen = SealGenerator(no_api_cache=False)
+        gen.set_extract_debug_dir(tmp_path)
+        assert gen._extractor.debug_dir == tmp_path
+
+    def test_set_extract_debug_dir_none(self) -> None:
+        from core import SealGenerator
+        gen = SealGenerator(no_api_cache=False)
+        gen.set_extract_debug_dir(None)
+        assert gen._extractor.debug_dir is None

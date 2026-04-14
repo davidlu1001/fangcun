@@ -138,10 +138,9 @@ def _generate_one(
 ) -> bool:
     """Generate and save one seal. Returns True on success."""
     try:
-        if args.debug_extract:
-            gen._extractor.debug_dir = output_dir / f"{text}_debug"
-        else:
-            gen._extractor.debug_dir = None
+        gen.set_extract_debug_dir(
+            output_dir / f"{text}_debug" if args.debug_extract else None
+        )
 
         result = gen.generate(
             text=text,
@@ -175,27 +174,13 @@ def _generate_one(
         console.print(f"  [dim]→ {out_path}[/dim]")
 
         if args.debug_layout:
-            from core.renderer import SealRenderer
-            # Re-run the pipeline up through layout to get placements
-            raw_images, _, _, tab_sources, source_names, _ = (
-                gen._scraper.fetch_chars_consistent(text, args.seal_type)
+            debug_overlay = gen.render_layout_debug(
+                text=text,
+                shape=args.shape,
+                style=args.style,
+                seal_type=args.seal_type,
+                size=args.size,
             )
-            masks = [
-                gen._extractor.extract(img, source=tab, source_name=src)
-                for img, tab, src in zip(raw_images, tab_sources, source_names)
-            ]
-            ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(
-                args.shape, args.size, args.style, len(text)
-            )
-            placements = gen._layout.arrange(
-                masks, args.shape, (ta_w, ta_h), args.style
-            )
-            for p in placements:
-                p["x"] += ta_x
-                p["y"] += ta_y
-
-            canvas_w, canvas_h = SealRenderer.canvas_dimensions(args.shape, args.size)
-            debug_overlay = gen._layout.debug_render(placements, (canvas_w, canvas_h))
             debug_path = output_dir / f"{text}_layout.png"
             debug_overlay.save(debug_path, "PNG")
             console.print(f"  [dim]→ layout debug: {debug_path}[/dim]")
