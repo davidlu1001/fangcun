@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import html
-import io
+import re
 import sys
 from base64 import b64encode
 from pathlib import Path
@@ -19,6 +19,19 @@ import numpy as np
 from PIL import Image
 
 OUTPUT_BASE = Path(__file__).parent / "output"
+
+# Run IDs go into filenames and directory paths — restrict to a safe charset
+# to prevent path traversal and shell-unfriendly names.
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _validate_run_id(name: str) -> str:
+    if not _SAFE_RUN_ID.match(name):
+        print(
+            f"Invalid run ID '{name}' — only [A-Za-z0-9_.-] allowed."
+        )
+        sys.exit(2)
+    return name
 
 
 def _img_to_b64(img_path: Path) -> str:
@@ -95,7 +108,7 @@ def compare(run_a: str, run_b: str) -> Path:
             <td>{html.escape(test_id)}</td>
             <td>{img_a_html}</td>
             <td>{img_b_html}</td>
-            <td class="status">{status}</td>
+            <td class="status">{html.escape(status)}</td>
         </tr>""")
 
     report_path = OUTPUT_BASE / f"compare_{run_a}_vs_{run_b}.html"
@@ -147,7 +160,10 @@ def main() -> None:
     parser.add_argument("run_b", help="Second run ID (e.g. git SHA or 'HEAD')")
     args = parser.parse_args()
 
-    report = compare(args.run_a, args.run_b)
+    run_a = _validate_run_id(args.run_a)
+    run_b = _validate_run_id(args.run_b)
+
+    report = compare(run_a, run_b)
     print(f"Comparison report: {report}")
 
 
