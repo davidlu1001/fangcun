@@ -18,6 +18,18 @@ Fangcun — Chinese Seal Generator for Geek-Zen
 
 中国传统电子印章生成工具。从书法字库自动抓取字形，渲染出具有金石质感的朱文/白文印章。
 
+## 样品 Gallery
+
+| 禅（1字·白文·竖椭圆） | 苏轼（名章·白文·竖椭圆） | 极客禅（品牌章·白文·竖椭圆） | 天人合一（4字·白文·方章） |
+|:---:|:---:|:---:|:---:|
+| <img src="docs/samples/c01_zen_bw_oval.png" width="160"> | <img src="docs/samples/c11_sushi_bw_oval.png" width="160"> | <img src="docs/samples/c16_geekzen_bw_oval.png" width="160"> | <img src="docs/samples/c20_tianren_bw_sq.png" width="160"> |
+
+| 卢修齐（名章·白文·方章） | 大观园（3字·朱文·竖椭圆） | 宇宙洪荒（4字·白文·方章） | 朝朝（重字·朱文·竖椭圆） |
+|:---:|:---:|:---:|:---:|
+| <img src="docs/samples/c18_luxiuqi_bw_sq.png" width="160"> | <img src="docs/samples/c23_daguan_zw_oval.png" width="160"> | <img src="docs/samples/宇宙洪荒_baiwen_square.png" width="160"> | <img src="docs/samples/朝朝_zhuwen_oval.png" width="160"> |
+
+_均为自动生成，字形来自 ygsf.com 书法字库（统一字源，主要取自《中国篆刻大字典》《汉印文字征》等正统汉印印谱）。_
+
 ## 功能
 
 - **朱白文渲染**：白文（红底白字实心填充）、朱文（透明底红字+红框，冲刀破边）
