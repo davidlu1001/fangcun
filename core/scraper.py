@@ -688,6 +688,24 @@ class CalligraphyScraper:
             src_names.append(best_source)
             self._save_cache(char, font_style, tab, img, best_source)
 
+        # Per-char stroke deviation summary (only for multi-char + non-zero target)
+        if target_sw > 0 and len(text) > 1:
+            deviations = []
+            for char, img in zip(text, images):
+                char_sw = self._relative_stroke_width(img)
+                dev = abs(char_sw - target_sw) / target_sw
+                deviations.append((char, char_sw, dev))
+                if dev > 0.20:
+                    logger.warning(
+                        "[R12] STROKE_DEVIATION '%s': rel_sw=%.3f target=%.3f deviation=%.0f%%",
+                        char, char_sw, target_sw, dev * 100,
+                    )
+            logger.info(
+                "[R12] 笔画匹配总结 source=%s target_sw=%.3f: %s",
+                best_source, target_sw,
+                ", ".join(f"'{c}'={sw:.3f}({d:.0%})" for c, sw, d in deviations),
+            )
+
         return images, tabs_, src_names, best_source
 
     @staticmethod
