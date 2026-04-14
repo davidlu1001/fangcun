@@ -19,3 +19,15 @@ dependencies = [
 
 [project.scripts]
 seal-cli = "cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "regression: visual regression tests (require network + cache)",
+    "unit: fast isolated unit tests",
+]
