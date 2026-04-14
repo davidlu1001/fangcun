@@ -176,6 +176,40 @@ class SealGenerator:
             })
         return variants
 
+    def generate_svg(
+        self,
+        text: str,
+        shape: str = "oval",
+        style: str = "baiwen",
+        seal_type: str = "leisure",
+        color: str = "#B22222",
+        size: int = 600,
+    ) -> dict:
+        """Generate a seal as SVG (clean vector, no texture).
+
+        Texture, rotation, and preview are NOT applied. Use generate() for
+        those raster-only effects. SVG output is suitable for print,
+        business cards, T-shirts, posters and further editing in Illustrator
+        or Inkscape.
+
+        Returns:
+            dict with keys: svg (str), font_used, font_fallback, warnings,
+                           consistency_level, source_names
+        """
+        prep = self._prepare_placements(text, shape, style, seal_type, size)
+        color_rgb = _hex_to_rgb(color)
+        svg_str = self._renderer.render_svg(
+            prep["placements"], shape, style, color_rgb, size,
+        )
+        return {
+            "svg": svg_str,
+            "font_used": prep["font_used"],
+            "font_fallback": prep["font_fallback"],
+            "warnings": prep["warnings"],
+            "consistency_level": prep["consistency_level"],
+            "source_names": prep["source_names"],
+        }
+
     # ── Private helpers shared by generate() and generate_variants() ──
 
     def _prepare_placements(

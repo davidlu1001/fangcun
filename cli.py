@@ -90,6 +90,15 @@ def _parse_args() -> argparse.Namespace:
         default="./seals",
         help="输出目录 (default: ./seals)",
     )
+    p.add_argument(
+        "--format",
+        choices=["png", "svg"],
+        default="png",
+        help=(
+            "输出格式 (default: png). SVG 为矢量格式，无石质纹理，"
+            "适合印刷/矢量编辑 (Illustrator / Inkscape)"
+        ),
+    )
 
     # Cache control
     p.add_argument(
@@ -138,6 +147,9 @@ def _generate_one(
 ) -> bool:
     """Generate and save one seal. Returns True on success."""
     try:
+        if args.format == "svg":
+            return _generate_one_svg(gen, text, args, output_dir)
+
         gen.set_extract_debug_dir(
             output_dir / f"{text}_debug" if args.debug_extract else None
         )
@@ -188,6 +200,55 @@ def _generate_one(
         console.print(f"  [red]✗ 生成失败: {exc}[/red]")
         logging.exception("Generation failed for '%s'", text)
         return False
+
+
+def _generate_one_svg(
+    gen: SealGenerator,
+    text: str,
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> bool:
+    """Generate and save one SVG seal. Returns True on success.
+
+    SVG output intentionally skips texture, rotation, and preview. If the
+    user mixed --format svg with raster-only flags, warn but continue.
+    """
+    if args.seed is not None:
+        console.print(
+            "  [yellow]⚠ --seed 对 SVG 无效（矢量输出无纹理）[/yellow]"
+        )
+    if args.debug_extract or args.debug_layout:
+        console.print(
+            "  [yellow]⚠ --debug-extract / --debug-layout 对 SVG 无效[/yellow]"
+        )
+
+    result = gen.generate_svg(
+        text=text,
+        shape=args.shape,
+        style=args.style,
+        seal_type=args.seal_type,
+        color=args.color,
+        size=args.size,
+    )
+
+    if args.strict_consistency and result.get("consistency_level", 0) > 2:
+        raise SourceInconsistencyError(text, result["consistency_level"])
+
+    filename = f"{text}_{args.style}_{args.shape}.svg"
+    out_path = output_dir / filename
+    out_path.write_text(result["svg"], encoding="utf-8")
+
+    font_info = result["font_used"]
+    if result["font_fallback"]:
+        console.print(f"  [yellow]⚠ 降级[/yellow] → {font_info}")
+    else:
+        console.print(f"  [green]✓[/green] 字体: {font_info}")
+
+    for w in result["warnings"]:
+        console.print(f"  [yellow]⚠ {w}[/yellow]")
+
+    console.print(f"  [dim]→ SVG saved: {out_path}[/dim]")
+    return True
 
 
 def main() -> None:
