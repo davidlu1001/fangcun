@@ -115,6 +115,67 @@ def generate_seal(
     )
 
 
+def generate_variants(
+    text: str,
+    shape_label: str,
+    style_label: str,
+    seal_type_label: str,
+    color_hex: str,
+    grain_strength: float,
+    rotation: float,
+) -> tuple[list | None, str]:
+    """Generate 3 texture-seed variations sharing identical source selection.
+
+    Returns a list of (image, caption) tuples for gr.Gallery plus a status string.
+    """
+    text = text.strip()
+    if not text:
+        return None, "请输入印章文字（1–4字）"
+
+    shape = _SHAPE_MAP.get(shape_label, "oval")
+    style = _STYLE_MAP.get(style_label, "baiwen")
+    seal_type = _TYPE_MAP.get(seal_type_label, "leisure")
+
+    try:
+        results = _gen.generate_variants(
+            text=text,
+            n=3,
+            shape=shape,
+            style=style,
+            seal_type=seal_type,
+            color=color_hex,
+            grain=grain_strength,
+            rotation=rotation,
+            seeds=[1, 2, 3],
+        )
+    except Exception as exc:
+        logging.exception("Variant generation failed")
+        return None, f"生成失败: {exc}"
+
+    # Shared metadata across variants — read from first
+    first = results[0]
+    if first["font_fallback"]:
+        status = f"⚠ 字体已降级 → 使用: {first['font_used']}"
+    else:
+        status = f"✓ 使用: {first['font_used']}"
+
+    level = first.get("consistency_level", 0)
+    if level:
+        status += f"\n\n**字源一致性**: {_CONSISTENCY_LABELS.get(level, f'L{level}')}"
+
+    status += "\n\n3 个版本仅石质纹理不同，文字/来源/布局完全一致。右键保存心仪版本。"
+
+    if first["warnings"]:
+        status += "\n\n" + "\n".join(f"⚠ {w}" for w in first["warnings"])
+
+    # Gallery wants list of (image, caption) tuples
+    gallery = [
+        (r["image_preview"], f"版本 {r['seed']}（种子 {r['seed']}）")
+        for r in results
+    ]
+    return gallery, status
+
+
 # ── Gradio UI ────────────────────────────────────────────────
 
 with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft()) as demo:
@@ -178,6 +239,7 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
             )
 
             generate_btn = gr.Button("✨ 生成印章", variant="primary")
+            variants_btn = gr.Button("✨ 生成 3 个版本（仅石质纹理差异）")
 
         # ── Right panel: preview ─────────────────────────────
         with gr.Column(scale=1):
@@ -204,6 +266,15 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
                     label="⬇ 下载 PNG（白底预览 · 备用）",
                     visible=True,
                 )
+
+            variants_gallery = gr.Gallery(
+                label="3 个版本（右键图片可下载心仪版本）",
+                columns=3,
+                rows=1,
+                height="auto",
+                preview=False,
+                object_fit="contain",
+            )
 
     # Hidden state for file paths
     transparent_path_state = gr.State(value=None)
@@ -233,6 +304,26 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
             status_output,
             dl_transparent,
             dl_preview,
+        ],
+    )
+
+    def on_generate_variants(text, shape, style, seal_type, color, grain, rotation):
+        return generate_variants(text, shape, style, seal_type, color, grain, rotation)
+
+    variants_btn.click(
+        fn=on_generate_variants,
+        inputs=[
+            text_input,
+            shape_input,
+            style_input,
+            seal_type_input,
+            color_input,
+            grain_input,
+            rotation_input,
+        ],
+        outputs=[
+            variants_gallery,
+            status_output,
         ],
     )
 

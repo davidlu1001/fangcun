@@ -77,8 +77,109 @@ class SealGenerator:
             dict with keys: image_transparent, image_preview,
                            font_used, font_fallback, warnings
         """
+        prep = self._prepare_placements(text, shape, style, seal_type, size)
+        rendered = self._render_and_texture(
+            placements=prep["placements"],
+            shape=shape,
+            style=style,
+            color=color,
+            grain=grain,
+            rotation=rotation,
+            size=size,
+            seed=seed,
+        )
+        return {
+            **rendered,
+            "font_used": prep["font_used"],
+            "font_fallback": prep["font_fallback"],
+            "warnings": prep["warnings"],
+            "consistency_level": prep["consistency_level"],
+            "source_names": prep["source_names"],
+        }
+
+    def generate_variants(
+        self,
+        text: str,
+        n: int = 3,
+        shape: str = "oval",
+        style: str = "baiwen",
+        seal_type: str = "leisure",
+        color: str = "#B22222",
+        grain: float = 0.25,
+        rotation: float = 2.0,
+        size: int = 600,
+        seeds: list[int] | None = None,
+    ) -> list[dict]:
+        """Generate N variations of a seal differing only in texture seed.
+
+        Same source selection, same layout, same render — only the stone texture
+        differs. Use when the user wants to pick the "best-looking" of several
+        slight stylistic variations.
+
+        The expensive steps (scrape + extract + layout) run ONCE; only the
+        cheap per-output steps (render + texture + rotate) loop per seed.
+
+        Args:
+            n: Number of variations to produce (default 3).
+            seeds: Optional explicit seed list of length n. If None, uses
+                [1, 2, ..., n] for reproducibility.
+            Other args: same as generate().
+
+        Returns:
+            List of dicts with the same keys as generate(), plus "seed" key.
+        """
+        if n < 1:
+            raise ValueError(f"n must be ≥ 1, got {n}")
+
+        if seeds is None:
+            seeds = list(range(1, n + 1))
+        elif len(seeds) != n:
+            raise ValueError(
+                f"seeds length ({len(seeds)}) must match n ({n})"
+            )
+
+        prep = self._prepare_placements(text, shape, style, seal_type, size)
+
+        variants: list[dict] = []
+        for seed in seeds:
+            rendered = self._render_and_texture(
+                placements=prep["placements"],
+                shape=shape,
+                style=style,
+                color=color,
+                grain=grain,
+                rotation=rotation,
+                size=size,
+                seed=seed,
+            )
+            variants.append({
+                **rendered,
+                "font_used": prep["font_used"],
+                "font_fallback": prep["font_fallback"],
+                "warnings": prep["warnings"],
+                "consistency_level": prep["consistency_level"],
+                "source_names": prep["source_names"],
+                "seed": seed,
+            })
+        return variants
+
+    # ── Private helpers shared by generate() and generate_variants() ──
+
+    def _prepare_placements(
+        self,
+        text: str,
+        shape: str,
+        style: str,
+        seal_type: str,
+        size: int,
+    ) -> dict:
+        """Run the expensive prefix: scrape → extract → layout.
+
+        Returns a dict with absolute-canvas placements plus provenance
+        metadata. Callers then feed this into `_render_and_texture` one
+        or more times with different seeds.
+        """
         warnings: list[str] = []
-        color_rgb = _hex_to_rgb(color)
 
         if not text:
             raise ValueError("印章文字不能为空")
@@ -99,7 +200,6 @@ class SealGenerator:
             self._scraper.fetch_chars_consistent(text, seal_type)
         )
         warnings.extend(fetch_warnings)
-        font_display = font_used
         consistency_level = getattr(self._scraper, "_last_consistency_level", 0)
 
         # ── 2. Extract character masks (source-aware) ────────
@@ -117,6 +217,32 @@ class SealGenerator:
         for p in placements:
             p["x"] += ta_x
             p["y"] += ta_y
+
+        return {
+            "placements": placements,
+            "font_used": font_used,
+            "font_fallback": any_fallback,
+            "warnings": warnings,
+            "consistency_level": consistency_level,
+            "source_names": list(source_names),
+        }
+
+    def _render_and_texture(
+        self,
+        placements: list,
+        shape: str,
+        style: str,
+        color: str,
+        grain: float,
+        rotation: float,
+        size: int,
+        seed: int | None,
+    ) -> dict:
+        """Run the cheap suffix: render → texture → rotate → preview.
+
+        Returns a dict with `image_transparent` and `image_preview`.
+        """
+        color_rgb = _hex_to_rgb(color)
 
         # ── 4. Render ────────────────────────────────────────
         seal = self._renderer.render(placements, shape, style, color_rgb, size)
@@ -161,11 +287,6 @@ class SealGenerator:
         return {
             "image_transparent": seal,
             "image_preview": preview,
-            "font_used": font_display,
-            "font_fallback": any_fallback,
-            "warnings": warnings,
-            "consistency_level": consistency_level,
-            "source_names": list(source_names),
         }
 
     # ── Public debug API ────────────────────────────────────
