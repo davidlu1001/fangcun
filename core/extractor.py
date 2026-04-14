@@ -15,6 +15,7 @@ Output: mode "L" image, 255 = stroke pixel, 0 = background
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -44,6 +45,7 @@ class CharExtractor:
 
     def __init__(self) -> None:
         self._detected_as_yinpu = False
+        self.debug_dir: Path | None = None  # Set externally to enable debug output
 
     def extract(
         self, img: Image.Image, source: str = "字典", source_name: str = ""
@@ -62,6 +64,10 @@ class CharExtractor:
         # Step 1: normalize polarity (three-tier defense)
         gray = self._normalize_to_black_on_white(img, source_name)
 
+        if self.debug_dir:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(gray, "L").save(self.debug_dir / "01_normalized.png")
+
         # Step 2: binarize
         if source == "真迹":
             gray = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
@@ -70,6 +76,9 @@ class CharExtractor:
             binary = self._binarize_adaptive(gray, block_size=block, c=10)
         else:
             binary = self._binarize_otsu(gray)
+
+        if self.debug_dir:
+            Image.fromarray(binary, "L").save(self.debug_dir / "02_binary.png")
 
         # (印框剥离已在 _extract_yinpu_strokes 阶段2 完成，无需额外步骤)
 
@@ -86,8 +95,14 @@ class CharExtractor:
         # Step 4: denoise
         binary = self._denoise(binary, strong=(source == "真迹"))
 
+        if self.debug_dir:
+            Image.fromarray(binary, "L").save(self.debug_dir / "03_denoised.png")
+
         # Step 5: crop to bounding box
         cropped = self._crop_bbox(binary)
+
+        if self.debug_dir:
+            Image.fromarray(cropped, "L").save(self.debug_dir / "04_cropped.png")
 
         return Image.fromarray(cropped, mode="L")
 

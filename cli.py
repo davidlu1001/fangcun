@@ -116,6 +116,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="严格一致性模式：仅接受 Level 1-2 统一来源",
     )
+    p.add_argument(
+        "--debug-extract",
+        action="store_true",
+        help="保存最后一个字的提取中间步骤至 {output_dir}/{text}_debug/",
+    )
 
     return p.parse_args()
 
@@ -128,6 +133,11 @@ def _generate_one(
 ) -> bool:
     """Generate and save one seal. Returns True on success."""
     try:
+        if args.debug_extract:
+            gen._extractor.debug_dir = output_dir / f"{text}_debug"
+        else:
+            gen._extractor.debug_dir = None
+
         result = gen.generate(
             text=text,
             shape=args.shape,
