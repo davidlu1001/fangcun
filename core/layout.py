@@ -388,3 +388,46 @@ class SealLayout:
         cx_geom = (arr.shape[1] - 1) / 2.0
         cy_geom = (arr.shape[0] - 1) / 2.0
         return int(round(cx_px - cx_geom)), int(round(cy_px - cy_geom))
+
+    @staticmethod
+    def debug_render(
+        placements: list[dict],
+        canvas_size: tuple[int, int],
+        ta_offset: tuple[int, int] = (0, 0),
+    ) -> Image.Image:
+        """Render debug overlay showing grid cells, ink bounds, and centroids.
+
+        Returns RGBA image: blue rectangles = cell boundaries, red rectangles =
+        ink bounding boxes, green dots = pixel-weighted centroids.
+        """
+        from PIL import ImageDraw
+        tw, th = canvas_size
+        debug = Image.new("RGBA", (tw, th), (255, 255, 255, 128))
+        draw = ImageDraw.Draw(debug)
+
+        for item in placements:
+            x = item["x"] - ta_offset[0]
+            y = item["y"] - ta_offset[1]
+            w, h = item["w"], item["h"]
+            # Cell boundary (blue)
+            draw.rectangle([x, y, x + w, y + h], outline=(0, 0, 255, 200), width=2)
+            # Ink bounding box (red)
+            mask_arr = np.array(item["img"])
+            ys, xs = np.where(mask_arr > 128)
+            if len(xs) > 0:
+                ink_x0 = int(xs.min()) + x
+                ink_y0 = int(ys.min()) + y
+                ink_x1 = int(xs.max()) + x
+                ink_y1 = int(ys.max()) + y
+                draw.rectangle(
+                    [ink_x0, ink_y0, ink_x1, ink_y1],
+                    outline=(255, 0, 0, 200), width=1,
+                )
+                # Centroid (green dot)
+                cx = int(np.mean(xs)) + x
+                cy = int(np.mean(ys)) + y
+                draw.ellipse(
+                    [cx - 3, cy - 3, cx + 3, cy + 3], fill=(0, 255, 0, 255)
+                )
+
+        return debug

@@ -121,6 +121,10 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="保存最后一个字的提取中间步骤至 {output_dir}/{text}_debug/",
     )
+    p.add_argument(
+        "--debug-layout", action="store_true",
+        help="保存版面布局调试图（蓝=cell，红=ink bbox，绿=centroid）至 {output_dir}/{text}_layout.png",
+    )
 
     return p.parse_args()
 
@@ -172,6 +176,33 @@ def _generate_one(
             console.print(f"  [yellow]⚠ {w}[/yellow]")
 
         console.print(f"  [dim]→ {out_path}[/dim]")
+
+        if args.debug_layout:
+            from core.renderer import SealRenderer
+            # Re-run the pipeline up through layout to get placements
+            raw_images, _, _, tab_sources, source_names, _ = (
+                gen._scraper.fetch_chars_consistent(text, args.seal_type)
+            )
+            masks = [
+                gen._extractor.extract(img, source=tab, source_name=src)
+                for img, tab, src in zip(raw_images, tab_sources, source_names)
+            ]
+            ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(
+                args.shape, args.size, args.style, len(text)
+            )
+            placements = gen._layout.arrange(
+                masks, args.shape, (ta_w, ta_h), args.style
+            )
+            for p in placements:
+                p["x"] += ta_x
+                p["y"] += ta_y
+
+            canvas_w, canvas_h = SealRenderer.canvas_dimensions(args.shape, args.size)
+            debug_overlay = gen._layout.debug_render(placements, (canvas_w, canvas_h))
+            debug_path = output_dir / f"{text}_layout.png"
+            debug_overlay.save(debug_path, "PNG")
+            console.print(f"  [dim]→ layout debug: {debug_path}[/dim]")
+
         return True
 
     except Exception as exc:
