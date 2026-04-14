@@ -36,3 +36,12 @@ class TestTextureDeterminism:
         arr1 = np.array(result1)
         arr2 = np.array(result2)
         assert not np.array_equal(arr1, arr2), "Different seeds should differ"
+
+    def test_seed_none_preserves_randomness(self) -> None:
+        """seed=None must remain non-deterministic (preserves prior behavior)."""
+        tex = StoneTexture()
+        img = Image.new("RGBA", (200, 200), (178, 34, 34, 255))
+
+        r1 = np.array(tex.apply(img, grain_strength=0.25, seed=None))
+        r2 = np.array(tex.apply(img, grain_strength=0.25, seed=None))
+        assert not np.array_equal(r1, r2), "seed=None must remain non-deterministic"
