@@ -363,6 +363,9 @@ class CalligraphyScraper:
         strict_font = (seal_type == "name")
         exclude_deco = (seal_type == "name")
         self._current_seal_type = seal_type
+        # Reset to 0 so an exception mid-call doesn't leave stale state from
+        # the previous invocation visible to the next reader.
+        self._last_consistency_level = 0
         warnings: list[str] = []
         best_fallback = None  # "chars found but no unified source" backup
         best_fallback_level = 0  # 3 = majority, 4 = min-loss

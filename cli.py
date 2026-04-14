@@ -141,6 +141,7 @@ def _generate_one(
         )
 
         if args.strict_consistency and result.get("consistency_level", 0) > 2:
+            # TODO(Task 5.1): replace with SourceInconsistencyError from core.errors
             raise ValueError(
                 f"严格一致性检查失败: consistency_level="
                 f"{result['consistency_level']}（要求 ≤ 2）"
