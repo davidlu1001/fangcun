@@ -29,6 +29,15 @@ _STYLE_MAP = {"白文": "baiwen", "朱文": "zhuwen"}
 _TYPE_MAP = {"名章（强制篆书）": "name", "闲章（允许隶楷）": "leisure", "品牌章（任何字体）": "brand"}
 
 
+_CONSISTENCY_LABELS = {
+    1: "L1 · 统一来源（最佳）",
+    2: "L2 · 宽池统一来源",
+    3: "L3 · 多数来源（部分字从次优）",
+    4: "L4 · 最小损失来源",
+    5: "L5 · 各字独立最优（来源混合）",
+}
+
+
 def generate_seal(
     text: str,
     shape_label: str,
@@ -37,6 +46,7 @@ def generate_seal(
     color_hex: str,
     grain_strength: float,
     rotation: float,
+    seed_value: float | None,
 ) -> tuple[Image.Image | None, Image.Image | None, str, str | None, str | None]:
     """
     Main generation callback for Gradio.
@@ -53,6 +63,11 @@ def generate_seal(
     style = _STYLE_MAP.get(style_label, "baiwen")
     seal_type = _TYPE_MAP.get(seal_type_label, "leisure")
 
+    # seed_value comes in as float from gr.Number; None or 0 means "random"
+    seed: int | None = None
+    if seed_value is not None and seed_value > 0:
+        seed = int(seed_value)
+
     try:
         result = _gen.generate(
             text=text,
@@ -62,6 +77,7 @@ def generate_seal(
             color=color_hex,
             grain=grain_strength,
             rotation=rotation,
+            seed=seed,
         )
     except Exception as exc:
         logging.exception("Generation failed")
@@ -73,8 +89,13 @@ def generate_seal(
     else:
         status = f"✓ 使用: {result['font_used']}"
 
+    # Consistency level (L1 best → L5 worst)
+    level = result.get("consistency_level", 0)
+    if level:
+        status += f"\n\n**字源一致性**: {_CONSISTENCY_LABELS.get(level, f'L{level}')}"
+
     if result["warnings"]:
-        status += "\n" + "\n".join(f"⚠ {w}" for w in result["warnings"])
+        status += "\n\n" + "\n".join(f"⚠ {w}" for w in result["warnings"])
 
     # Save to temp files for download buttons
     tmp_dir = Path(tempfile.gettempdir()) / "seal_gen"
@@ -149,6 +170,13 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
                 label="🔄 旋转角度（°）",
             )
 
+            seed_input = gr.Number(
+                label="🎲 随机种子（留空或 0 = 随机；固定数字 = 可复现）",
+                value=None,
+                precision=0,
+                minimum=0,
+            )
+
             generate_btn = gr.Button("✨ 生成印章", variant="primary")
 
         # ── Right panel: preview ─────────────────────────────
@@ -181,9 +209,9 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
     transparent_path_state = gr.State(value=None)
     preview_path_state = gr.State(value=None)
 
-    def on_generate(text, shape, style, seal_type, color, grain, rotation):
+    def on_generate(text, shape, style, seal_type, color, grain, rotation, seed):
         img_t, img_p, status, path_t, path_p = generate_seal(
-            text, shape, style, seal_type, color, grain, rotation
+            text, shape, style, seal_type, color, grain, rotation, seed
         )
         return img_t, img_p, status, path_t, path_p
 
@@ -197,6 +225,7 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
             color_input,
             grain_input,
             rotation_input,
+            seed_input,
         ],
         outputs=[
             transparent_output,
