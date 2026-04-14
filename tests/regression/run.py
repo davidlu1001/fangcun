@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import io
 import logging
@@ -111,6 +112,12 @@ def run_corpus(
                 t0 = time.perf_counter()
 
                 try:
+                    # Fixed per-case seed makes regression runs byte-reproducible.
+                    # MD5 (not Python's hash() — that's randomized per-process via
+                    # PYTHONHASHSEED) keeps the seed stable across invocations so
+                    # baseline vs baseline_verify can detect real divergence.
+                    seed_key = f"{test_id}/{attempt}".encode()
+                    case_seed = int(hashlib.md5(seed_key).hexdigest()[:8], 16)
                     result = gen.generate(
                         text=case["text"],
                         shape=case["shape"],
@@ -119,6 +126,7 @@ def run_corpus(
                         grain=0.25,
                         rotation=2.0,
                         size=600,
+                        seed=case_seed,
                     )
                     elapsed = time.perf_counter() - t0
 
