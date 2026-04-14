@@ -50,6 +50,8 @@ import numpy as np
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
+from .errors import RateLimitedError, UpstreamApiError
+
 try:
     from Crypto.Cipher import AES
     from Crypto.Util.Padding import pad, unpad
@@ -1068,6 +1070,10 @@ class CalligraphyScraper:
         # ── Network fetch ───────────────────────────────────
         encrypted = _encrypt_params(params)
 
+        last_status: Optional[int] = None
+        last_detail: str = ""
+        saw_rate_limit = False
+
         for attempt in range(3):
             try:
                 time.sleep(random.uniform(0.5, 2.0))
@@ -1083,6 +1089,13 @@ class CalligraphyScraper:
                     },
                     timeout=10,
                 )
+                # Classify status before raise_for_status so we retain
+                # enough context to raise a typed error after retries.
+                last_status = resp.status_code
+                if resp.status_code == 429:
+                    saw_rate_limit = True
+                    last_detail = "rate limited"
+                    raise requests.HTTPError("429 rate limited", response=resp)
                 resp.raise_for_status()
 
                 data = _decrypt_response(resp.text)
@@ -1097,6 +1110,7 @@ class CalligraphyScraper:
                 return glyph_list
 
             except requests.RequestException as exc:
+                last_detail = str(exc)
                 wait = (2**attempt) + random.uniform(0, 1)
                 logger.warning(
                     "Request failed (attempt %d/3): %s — retrying in %.1fs",
@@ -1106,7 +1120,13 @@ class CalligraphyScraper:
                 )
                 time.sleep(wait)
 
-        return []
+        # All retries exhausted — surface the failure as a typed error so
+        # callers (Gradio UI, CLI, future API consumers) can distinguish
+        # "API unreachable" from "character has no glyphs". Per-character
+        # absence is signalled by returning [] on a successful HTTP call.
+        if saw_rate_limit:
+            raise RateLimitedError()
+        raise UpstreamApiError(last_status, last_detail or "connection failed")
 
     @staticmethod
     def _write_api_cache(params: dict, glyph_list: Optional[list[dict]]) -> None:

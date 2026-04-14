@@ -61,3 +61,92 @@ class TestErrorHierarchy:
     def test_rate_limited_message(self) -> None:
         e = RateLimitedError()
         assert "频率" in str(e) or "rate" in str(e).lower()
+
+
+@pytest.mark.unit
+class TestErrorRaiseSites:
+    """Verify the right error type is raised at each pipeline boundary.
+
+    These tests use mocks to force specific failure modes — they do not
+    hit the real network. `_query_glyph_list` retries 3 times with
+    exponential backoff + jitter; we monkeypatch `time.sleep` to zero so
+    tests run fast, and monkeypatch `requests.Session.post` to force the
+    desired failure on every retry.
+    """
+
+    def _make_scraper(self, monkeypatch):
+        """Build a scraper with cache disabled and sleeps stubbed out."""
+        import core.scraper as scraper_mod
+
+        # Stub sleeps so 3 retries don't take ~10 seconds of real time.
+        monkeypatch.setattr(scraper_mod.time, "sleep", lambda _s: None)
+        return scraper_mod.CalligraphyScraper(no_api_cache=True)
+
+    def test_upstream_api_error_on_connection_failure(self, monkeypatch) -> None:
+        """Pure network failure (no HTTP response) -> UpstreamApiError with no status_code."""
+        import requests
+
+        def fake_post(*args, **kwargs):
+            raise requests.ConnectionError("simulated network failure")
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+        scraper = self._make_scraper(monkeypatch)
+
+        with pytest.raises(UpstreamApiError) as excinfo:
+            scraper._query_glyph_list("禅", font_style="篆", tab_type=3)
+        assert excinfo.value.status_code is None
+        assert "simulated network failure" in str(excinfo.value)
+
+    def test_rate_limited_on_http_429(self, monkeypatch) -> None:
+        """HTTP 429 on every attempt -> RateLimitedError."""
+        import requests
+
+        class FakeResp:
+            status_code = 429
+            text = ""
+
+            def raise_for_status(self):
+                raise requests.HTTPError("429", response=self)
+
+        def fake_post(*args, **kwargs):
+            return FakeResp()
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+        scraper = self._make_scraper(monkeypatch)
+
+        with pytest.raises(RateLimitedError):
+            scraper._query_glyph_list("禅", font_style="篆", tab_type=3)
+
+    def test_upstream_api_error_on_http_500(self, monkeypatch) -> None:
+        """Non-429 HTTP error -> UpstreamApiError carrying the status_code."""
+        import requests
+
+        class FakeResp:
+            status_code = 500
+            text = ""
+
+            def raise_for_status(self):
+                raise requests.HTTPError("500 server error", response=self)
+
+        def fake_post(*args, **kwargs):
+            return FakeResp()
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+        scraper = self._make_scraper(monkeypatch)
+
+        with pytest.raises(UpstreamApiError) as excinfo:
+            scraper._query_glyph_list("禅", font_style="篆", tab_type=3)
+        assert excinfo.value.status_code == 500
+
+    def test_typed_errors_catchable_as_seal_error(self, monkeypatch) -> None:
+        """Callers can catch any pipeline failure via the SealError base class."""
+        import requests
+
+        def fake_post(*args, **kwargs):
+            raise requests.Timeout("simulated timeout")
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+        scraper = self._make_scraper(monkeypatch)
+
+        with pytest.raises(SealError):
+            scraper._query_glyph_list("禅", font_style="篆", tab_type=3)
