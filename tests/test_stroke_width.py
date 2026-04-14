@@ -170,3 +170,43 @@ class TestAdaptivePick:
         target_sw = 0.01
         chosen, _ = self.scraper._adaptive_pick(variants, top_score=100.0, target_sw=target_sw)
         assert chosen[1] == 100.0
+
+    def test_quality_floor_reverts_to_top_when_both_bad(self) -> None:
+        """When adaptive picker would pick a low-score variant that still
+        deviates badly, revert to the top variant (trust score over harmony).
+        """
+        # Top is thick, far from target. Only a Δ=30 (below quality floor)
+        # variant has a closer stroke, but it's still far off.
+        top_sw = self.scraper._relative_stroke_width(_stroke_img(60))
+        variants = [
+            (_stroke_img(60), 100.0, "字典"),  # top: thick, score 100
+            (_stroke_img(40), 65.0, "字典"),   # Δ=35 (below floor), still not matching
+        ]
+        # target is very thin — neither variant is close
+        target_sw = 0.001
+        chosen, window = self.scraper._adaptive_pick(
+            variants, top_score=100.0, target_sw=target_sw,
+        )
+        # Quality floor should revert to top (score=100)
+        assert chosen[1] == 100.0, (
+            f"Quality floor should revert to top when Δ too large and dev still high, "
+            f"got score {chosen[1]}"
+        )
+        # Stroke width of chosen matches top
+        assert abs(self.scraper._relative_stroke_width(chosen[0]) - top_sw) < 0.001
+
+    def test_quality_floor_accepts_large_delta_when_harmony_is_good(self) -> None:
+        """Large Δ is OK if the chosen variant matches target well enough."""
+        variants = [
+            (_stroke_img(60), 100.0, "字典"),  # top: thick, far from target
+            (_stroke_img(20), 75.0, "字典"),   # Δ=25 (within ±25 window), matches target
+        ]
+        target_sw = self.scraper._relative_stroke_width(_stroke_img(20))
+        chosen, _ = self.scraper._adaptive_pick(
+            variants, top_score=100.0, target_sw=target_sw,
+        )
+        # Should pick the Δ=25 variant — it matches target, harmony is good,
+        # so quality floor shouldn't kick in.
+        assert chosen[1] == 75.0, (
+            f"Should accept Δ=25 variant when it matches target, got {chosen[1]}"
+        )

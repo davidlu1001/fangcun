@@ -140,6 +140,17 @@ R12_STROKE_DEVIATION_WARN = 0.20
 _R12_WINDOW_TIERS = (5.0, 15.0, 25.0)
 _R12_DEVIATION_OK = 0.20  # accept if chosen variant deviates ≤ this from target
 
+# R12 quality floor: if widening the window yields a variant whose score is
+# far below the top (Δ > _R12_QUALITY_FLOOR_DELTA) AND stroke deviation is
+# STILL high (> _R12_QUALITY_FLOOR_DEV), revert to the top variant. Rationale:
+# at very wide windows, the adaptive picker may choose a low-popularity variant
+# that happens to match target stroke width, but its image quality (cleanness,
+# resolution) may be noticeably worse. The floor says "if we can't find a good
+# match AND we've had to go deep in score, trust the top (score) over the
+# stroke-harmony signal — bad stroke harmony beats bad image quality."
+_R12_QUALITY_FLOOR_DELTA = 20.0
+_R12_QUALITY_FLOOR_DEV = 0.40
+
 # R12 anchor eligibility: chars with extreme aspect ratios (一, 三 → wide;
 # tall narrow chars → vertical) have rel_sw ≈ 1.0 because the whole image
 # IS the stroke. Including them in the anchor median poisons the target and
@@ -817,8 +828,28 @@ class CalligraphyScraper:
             chosen = candidate
             used_window = max_delta
             cand_sw = self._relative_stroke_width(candidate[0])
-            if abs(cand_sw - target_sw) / target_sw <= _R12_DEVIATION_OK:
+            if target_sw > 0 and abs(cand_sw - target_sw) / target_sw <= _R12_DEVIATION_OK:
                 break
+
+        # Quality floor: if final pick dropped score a lot AND still deviates
+        # significantly from target, trust score over stroke harmony. Avoids
+        # picking a low-popularity dirty scan just because its stroke happens
+        # to match the target.
+        chosen_delta = top_score - chosen[1]
+        chosen_sw = self._relative_stroke_width(chosen[0])
+        chosen_dev = abs(chosen_sw - target_sw) / target_sw if target_sw > 0 else 0.0
+        if (
+            chosen_delta > _R12_QUALITY_FLOOR_DELTA
+            and chosen_dev > _R12_QUALITY_FLOOR_DEV
+        ):
+            logger.warning(
+                "[R12] 质量保底: chosen Δscore=%.1f deviation=%.0f%% — "
+                "reverting to top variant",
+                chosen_delta, chosen_dev * 100,
+            )
+            chosen = variants[0]
+            used_window = _R12_WINDOW_TIERS[0]
+
         return chosen, used_window
 
     @staticmethod
