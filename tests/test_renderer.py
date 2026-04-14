@@ -22,52 +22,64 @@ def _make_dummy_layout(w: int = 600, h: int = 600) -> list[dict]:
     return [{"img": mask, "x": 200, "y": 200, "w": 100, "h": 100}]
 
 
+# Shape-aware thresholds. Oval clips ~21.5% of canvas to fully-transparent
+# corners (π/4 inscribed ellipse), so opaque-baiwen tops out around 0.78 and
+# the same threshold can't apply to both shapes.
+_BAIWEN_OPAQUE_FLOOR = {"square": 0.8, "oval": 0.65}
+_ZHUWEN_TRANSPARENT_FLOOR = {"square": 0.5, "oval": 0.5}
+
+
 @pytest.mark.unit
 class TestStyleExclusivity:
     """Verify baiwen and zhuwen rendering produce fundamentally different outputs."""
 
-    def test_baiwen_has_opaque_background(self) -> None:
+    @pytest.mark.parametrize("shape", ["square", "oval"])
+    def test_baiwen_has_opaque_background(self, shape: str) -> None:
         """Baiwen: solid red background, white text cutouts."""
         renderer = SealRenderer()
         layout = _make_dummy_layout()
         result = renderer.render(
-            layout, shape="square", style="baiwen", color=(178, 34, 34), size=600
+            layout, shape=shape, style="baiwen", color=(178, 34, 34), size=600
         )
         arr = np.array(result)
-        # Baiwen has mostly opaque pixels (red background)
         opaque_ratio = (arr[:, :, 3] > 200).sum() / arr[:, :, 3].size
-        assert opaque_ratio > 0.8, (
-            f"Baiwen should have opaque background, got {opaque_ratio:.2f}"
+        floor = _BAIWEN_OPAQUE_FLOOR[shape]
+        assert opaque_ratio > floor, (
+            f"Baiwen {shape} should have opaque background "
+            f"(>{floor}), got {opaque_ratio:.2f}"
         )
 
-    def test_zhuwen_has_transparent_background(self) -> None:
+    @pytest.mark.parametrize("shape", ["square", "oval"])
+    def test_zhuwen_has_transparent_background(self, shape: str) -> None:
         """Zhuwen: transparent background, red text + frame."""
         renderer = SealRenderer()
         layout = _make_dummy_layout()
         result = renderer.render(
-            layout, shape="square", style="zhuwen", color=(178, 34, 34), size=600
+            layout, shape=shape, style="zhuwen", color=(178, 34, 34), size=600
         )
         arr = np.array(result)
-        # Zhuwen has mostly transparent pixels
         transparent_ratio = (arr[:, :, 3] < 10).sum() / arr[:, :, 3].size
-        assert transparent_ratio > 0.5, (
-            f"Zhuwen should have transparent bg, got {transparent_ratio:.2f}"
+        floor = _ZHUWEN_TRANSPARENT_FLOOR[shape]
+        assert transparent_ratio > floor, (
+            f"Zhuwen {shape} should have transparent bg "
+            f"(>{floor}), got {transparent_ratio:.2f}"
         )
 
-    def test_baiwen_zhuwen_structurally_different(self) -> None:
+    @pytest.mark.parametrize("shape", ["square", "oval"])
+    def test_baiwen_zhuwen_structurally_different(self, shape: str) -> None:
         """The two styles must produce structurally different alpha channels."""
         renderer = SealRenderer()
         layout = _make_dummy_layout()
         bw = renderer.render(
-            layout, shape="square", style="baiwen", color=(178, 34, 34), size=600
+            layout, shape=shape, style="baiwen", color=(178, 34, 34), size=600
         )
         zw = renderer.render(
-            layout, shape="square", style="zhuwen", color=(178, 34, 34), size=600
+            layout, shape=shape, style="zhuwen", color=(178, 34, 34), size=600
         )
         bw_alpha = np.array(bw)[:, :, 3]
         zw_alpha = np.array(zw)[:, :, 3]
-        # They should be very different (one is mostly opaque, other mostly transparent)
         diff = np.abs(bw_alpha.astype(float) - zw_alpha.astype(float)).mean()
         assert diff > 100, (
-            f"Baiwen and zhuwen should differ substantially, mean diff={diff:.1f}"
+            f"Baiwen vs zhuwen ({shape}) should differ substantially, "
+            f"mean diff={diff:.1f}"
         )

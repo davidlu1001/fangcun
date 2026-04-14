@@ -122,6 +122,12 @@ class SealGenerator:
         # Style-exclusivity sanity check: baiwen must yield an opaque seal,
         # zhuwen must yield a mostly-transparent one. Catches yin/yang
         # mixing bugs before the texture/rotation stages obscure them.
+        #
+        # Thresholds are shape-agnostic with ≥2× safety margin:
+        #   - Oval baiwen opaque floor ≈ π/4 ≈ 0.785 (inscribed ellipse area)
+        #     minus char cutout, so 0.5 is conservative.
+        #   - Oval zhuwen transparent ≈ 0.85+ (mostly empty inside ellipse +
+        #     fully-clipped corners), so 0.2 is conservative.
         if __debug__:
             _arr = np.array(seal)
             if style == "baiwen":
