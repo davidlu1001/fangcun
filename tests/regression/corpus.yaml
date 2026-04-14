@@ -1,0 +1,290 @@
+# tests/regression/corpus.yaml
+# Fangcun regression test corpus
+# 40+ cases covering character counts, difficulty, combos, edge cases
+
+# ── 1-char tests ────────────────────────────────────────────
+- id: c01_zen_bw_oval
+  text: "禅"
+  shape: oval
+  style: baiwen
+  seal_type: leisure
+  notes: "flagship 1-char, common char"
+
+- id: c02_zen_zw_sq
+  text: "禅"
+  shape: square
+  style: zhuwen
+  seal_type: leisure
+  notes: "same char, opposite style+shape"
+
+- id: c03_dao_zw_sq
+  text: "道"
+  shape: square
+  style: zhuwen
+  seal_type: leisure
+  notes: "complex single char, zhuwen square"
+
+- id: c04_yong_bw_sq
+  text: "永"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "永 — calligraphy benchmark char"
+
+- id: c05_yi_bw_sq
+  text: "一"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "extreme horizontal aspect ratio"
+
+- id: c06_san_bw_sq
+  text: "三"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "extreme horizontal, 3 strokes"
+
+- id: c07_xin_bw_oval
+  text: "心"
+  shape: oval
+  style: baiwen
+  seal_type: leisure
+  notes: "simple char in oval"
+
+- id: c08_kong_zw_oval
+  text: "空"
+  shape: oval
+  style: zhuwen
+  seal_type: leisure
+  notes: "medium complexity, zhuwen oval"
+
+- id: c09_zen_bw_sq_name
+  text: "禅"
+  shape: square
+  style: baiwen
+  seal_type: name
+  notes: "1-char name seal — strict 篆 mode"
+
+- id: c10_zen_oval_name
+  text: "禅"
+  shape: oval
+  style: zhuwen
+  seal_type: name
+  notes: "1-char zhuwen oval name seal"
+
+# ── 2-char tests ────────────────────────────────────────────
+- id: c11_sushi_bw_oval
+  text: "苏轼"
+  shape: oval
+  style: baiwen
+  seal_type: name
+  notes: "2-char name seal, simplified input (苏→蘇)"
+
+- id: c12_xiuqi_zw_oval
+  text: "修齐"
+  shape: oval
+  style: zhuwen
+  seal_type: name
+  notes: "2-char zhuwen oval name (齐→齊)"
+
+- id: c13_chaochao_zw_oval
+  text: "朝朝"
+  shape: oval
+  style: zhuwen
+  seal_type: leisure
+  notes: "repeated char — R9 short-circuit"
+
+- id: c14_zhizhi_bw_sq
+  text: "知足"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "R12 stroke-width sibling match test case"
+
+- id: c15_luxi_bw_oval
+  text: "卢修"
+  shape: oval
+  style: baiwen
+  seal_type: name
+  notes: "rare char 卢→盧 in name mode"
+
+# ── 3-char tests ────────────────────────────────────────────
+- id: c16_geekzen_bw_oval
+  text: "极客禅"
+  shape: oval
+  style: baiwen
+  seal_type: brand
+  notes: "brand seal, 3 chars, simplified (极→極, 客 stays)"
+
+- id: c17_geekzen_zw_sq
+  text: "极客禅"
+  shape: square
+  style: zhuwen
+  seal_type: brand
+  notes: "brand 3-char square zhuwen"
+
+- id: c18_luxiuqi_bw_sq
+  text: "卢修齐"
+  shape: square
+  style: baiwen
+  seal_type: name
+  notes: "3-char name seal — the decorative source bug origin"
+
+- id: c19_luxiuqi_zw_oval
+  text: "卢修齐"
+  shape: oval
+  style: zhuwen
+  seal_type: name
+  notes: "3-char name zhuwen oval"
+
+# ── 4-char tests ────────────────────────────────────────────
+- id: c20_tianren_bw_sq
+  text: "天人合一"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "4-char square baiwen — canonical 2x2 grid"
+
+- id: c21_tianren_zw_sq
+  text: "天人合一"
+  shape: square
+  style: zhuwen
+  seal_type: leisure
+  notes: "4-char zhuwen with extreme char 一"
+
+- id: c22_daguan_bw_oval
+  text: "大观园"
+  shape: oval
+  style: baiwen
+  seal_type: leisure
+  notes: "3-char oval baiwen, complex chars"
+
+- id: c23_daguan_zw_oval
+  text: "大观园"
+  shape: oval
+  style: zhuwen
+  seal_type: leisure
+  notes: "3-char zhuwen oval — R11 corner clipping test"
+
+# ── complex/rare char tests ─────────────────────────────────
+- id: c24_gui_bw_sq
+  text: "龟"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "complex char (龟→龜), high stroke count"
+
+- id: c25_ling_zw_oval
+  text: "灵"
+  shape: oval
+  style: zhuwen
+  seal_type: leisure
+  notes: "complex char (灵→靈)"
+
+- id: c26_yu_bw_sq
+  text: "鬱"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "most complex common char, already traditional"
+
+- id: c27_xiang_zw_sq
+  text: "响"
+  shape: square
+  style: zhuwen
+  seal_type: leisure
+  notes: "complex char (响→響)"
+
+# ── edge cases ──────────────────────────────────────────────
+- id: c28_yi_oval_zw
+  text: "一"
+  shape: oval
+  style: zhuwen
+  seal_type: leisure
+  notes: "extreme aspect in oval — worst case layout"
+
+- id: c29_4char_oval
+  text: "天人合一"
+  shape: oval
+  style: baiwen
+  seal_type: leisure
+  notes: "4 chars in oval — cramped layout test"
+
+- id: c30_singlerepeat
+  text: "禅禅"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "repeated char — R9 short-circuit with 2 copies"
+
+- id: c31_brand_flexible
+  text: "极客禅"
+  shape: oval
+  style: baiwen
+  seal_type: brand
+  notes: "brand type — most flexible font selection"
+
+- id: c32_5char_overflow
+  text: "天地玄黄宇"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: ">4 chars — auto-shrink + warning"
+
+- id: c33_trad_input
+  text: "盧修齊"
+  shape: square
+  style: baiwen
+  seal_type: name
+  notes: "already-traditional input — should NOT double-convert"
+
+- id: c34_zhi_bw_sq
+  text: "止"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "simple char, few strokes"
+
+- id: c35_mixed_complexity
+  text: "一鬱"
+  shape: oval
+  style: baiwen
+  seal_type: leisure
+  notes: "extreme contrast: simplest + most complex char together"
+
+# ── style × shape completeness ──────────────────────────────
+- id: c36_2char_bw_sq
+  text: "苏轼"
+  shape: square
+  style: baiwen
+  seal_type: name
+  notes: "2-char baiwen square (complement to c11 oval)"
+
+- id: c37_3char_bw_sq_leisure
+  text: "大观园"
+  shape: square
+  style: baiwen
+  seal_type: leisure
+  notes: "3-char square baiwen leisure"
+
+- id: c38_4char_zw_oval
+  text: "天人合一"
+  shape: oval
+  style: zhuwen
+  seal_type: leisure
+  notes: "4-char zhuwen oval — max complexity combo"
+
+- id: c39_name_zw_sq
+  text: "修齐"
+  shape: square
+  style: zhuwen
+  seal_type: name
+  notes: "2-char name zhuwen square"
+
+- id: c40_brand_zw_oval
+  text: "极客禅"
+  shape: oval
+  style: zhuwen
+  seal_type: brand
+  notes: "brand zhuwen oval"
