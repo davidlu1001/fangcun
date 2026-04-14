@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+import numpy as np
 from PIL import Image
 
 from .extractor import CharExtractor
@@ -117,6 +118,22 @@ class SealGenerator:
 
         # ── 4. Render ────────────────────────────────────────
         seal = self._renderer.render(placements, shape, style, color_rgb, size)
+
+        # Style-exclusivity sanity check: baiwen must yield an opaque seal,
+        # zhuwen must yield a mostly-transparent one. Catches yin/yang
+        # mixing bugs before the texture/rotation stages obscure them.
+        if __debug__:
+            _arr = np.array(seal)
+            if style == "baiwen":
+                _opaque = (_arr[:, :, 3] > 200).sum() / _arr[:, :, 3].size
+                assert _opaque > 0.5, (
+                    f"Baiwen style sanity check failed: opaque_ratio={_opaque:.2f}"
+                )
+            else:
+                _transparent = (_arr[:, :, 3] < 10).sum() / _arr[:, :, 3].size
+                assert _transparent > 0.2, (
+                    f"Zhuwen style sanity check failed: transparent_ratio={_transparent:.2f}"
+                )
 
         # ── 5. Texture ───────────────────────────────────────
         seal = self._texture.apply(seal, grain, seed=seed)
