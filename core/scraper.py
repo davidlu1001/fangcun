@@ -284,6 +284,36 @@ def _img_meta_path(img_url: str) -> Path:
     return IMG_CACHE_DIR / f"{h}.meta"
 
 
+def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
+    """Parse an HTTP Retry-After header into seconds.
+
+    Supports the two forms from RFC 7231:
+      - seconds: e.g. "120"
+      - HTTP-date: e.g. "Wed, 21 Oct 2015 07:28:00 GMT"
+
+    Returns None if the header is missing or unparseable.
+    """
+    if not header_value:
+        return None
+    header_value = header_value.strip()
+    # Integer seconds form.
+    try:
+        seconds = float(header_value)
+        return max(0.0, seconds)
+    except ValueError:
+        pass
+    # HTTP-date form.
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(header_value)
+        if dt is None:
+            return None
+        delta = dt.timestamp() - time.time()
+        return max(0.0, delta)
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_cache_fresh(path: Path, ttl_days: int) -> bool:
     """Check if a cache file exists and is within TTL."""
     if not path.exists():
@@ -1172,6 +1202,7 @@ class CalligraphyScraper:
         last_status: Optional[int] = None
         last_detail: str = ""
         saw_rate_limit = False
+        last_retry_after: Optional[float] = None
 
         for attempt in range(3):
             try:
@@ -1194,6 +1225,9 @@ class CalligraphyScraper:
                 if resp.status_code == 429:
                     saw_rate_limit = True
                     last_detail = "rate limited"
+                    last_retry_after = _parse_retry_after(
+                        resp.headers.get("Retry-After")
+                    )
                     raise requests.HTTPError("429 rate limited", response=resp)
                 resp.raise_for_status()
 
@@ -1210,13 +1244,23 @@ class CalligraphyScraper:
 
             except requests.RequestException as exc:
                 last_detail = str(exc)
-                wait = (2**attempt) + random.uniform(0, 1)
-                logger.warning(
-                    "Request failed (attempt %d/3): %s — retrying in %.1fs",
-                    attempt + 1,
-                    exc,
-                    wait,
-                )
+                # 429 with Retry-After: honor the server's hint (capped at 60s).
+                # Otherwise: exponential backoff + jitter.
+                if saw_rate_limit and last_retry_after is not None:
+                    wait = min(last_retry_after, 60.0)
+                    logger.warning(
+                        "Rate limited (attempt %d/3): Retry-After=%.1fs",
+                        attempt + 1,
+                        wait,
+                    )
+                else:
+                    wait = (2**attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        "Request failed (attempt %d/3): %s — retrying in %.1fs",
+                        attempt + 1,
+                        exc,
+                        wait,
+                    )
                 time.sleep(wait)
 
         # All retries exhausted — surface the failure as a typed error so
@@ -1224,7 +1268,7 @@ class CalligraphyScraper:
         # "API unreachable" from "character has no glyphs". Per-character
         # absence is signalled by returning [] on a successful HTTP call.
         if saw_rate_limit:
-            raise RateLimitedError()
+            raise RateLimitedError(retry_after=last_retry_after)
         raise UpstreamApiError(last_status, last_detail or "connection failed")
 
     @staticmethod

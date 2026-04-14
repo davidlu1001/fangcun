@@ -61,5 +61,11 @@ class UpstreamApiError(SealError):
 class RateLimitedError(SealError):
     """ygsf.com rate-limited us."""
 
-    def __init__(self) -> None:
-        super().__init__("ygsf.com 请求频率超限，请稍后重试。")
+    def __init__(self, retry_after: float | None = None) -> None:
+        self.retry_after = retry_after
+        if retry_after is not None:
+            super().__init__(
+                f"ygsf.com 请求频率超限，建议 {retry_after:.0f}s 后重试。"
+            )
+        else:
+            super().__init__("ygsf.com 请求频率超限，请稍后重试。")

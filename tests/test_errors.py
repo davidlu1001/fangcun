@@ -61,6 +61,12 @@ class TestErrorHierarchy:
     def test_rate_limited_message(self) -> None:
         e = RateLimitedError()
         assert "频率" in str(e) or "rate" in str(e).lower()
+        assert e.retry_after is None
+
+    def test_rate_limited_carries_retry_after(self) -> None:
+        e = RateLimitedError(retry_after=30.0)
+        assert e.retry_after == 30.0
+        assert "30" in str(e)
 
 
 @pytest.mark.unit
@@ -104,6 +110,7 @@ class TestErrorRaiseSites:
         class FakeResp:
             status_code = 429
             text = ""
+            headers: dict = {}
 
             def raise_for_status(self):
                 raise requests.HTTPError("429", response=self)
@@ -116,6 +123,25 @@ class TestErrorRaiseSites:
 
         with pytest.raises(RateLimitedError):
             scraper._query_glyph_list("禅", font_style="篆", tab_type=3)
+
+    def test_rate_limited_propagates_retry_after(self, monkeypatch) -> None:
+        """429 with Retry-After header -> error carries the hint."""
+        import requests
+
+        class FakeResp:
+            status_code = 429
+            text = ""
+            headers = {"Retry-After": "45"}
+
+            def raise_for_status(self):
+                raise requests.HTTPError("429", response=self)
+
+        monkeypatch.setattr(requests.Session, "post", lambda *a, **k: FakeResp())
+        scraper = self._make_scraper(monkeypatch)
+
+        with pytest.raises(RateLimitedError) as excinfo:
+            scraper._query_glyph_list("禅", font_style="篆", tab_type=3)
+        assert excinfo.value.retry_after == 45.0
 
     def test_upstream_api_error_on_http_500(self, monkeypatch) -> None:
         """Non-429 HTTP error -> UpstreamApiError carrying the status_code."""
@@ -150,3 +176,30 @@ class TestErrorRaiseSites:
 
         with pytest.raises(SealError):
             scraper._query_glyph_list("禅", font_style="篆", tab_type=3)
+
+
+@pytest.mark.unit
+class TestParseRetryAfter:
+    """HTTP Retry-After header can be either seconds or an HTTP-date."""
+
+    def test_parse_seconds(self) -> None:
+        from core.scraper import _parse_retry_after
+        assert _parse_retry_after("60") == 60.0
+        assert _parse_retry_after("  30  ") == 30.0
+        assert _parse_retry_after("0") == 0.0
+
+    def test_parse_none_or_empty(self) -> None:
+        from core.scraper import _parse_retry_after
+        assert _parse_retry_after(None) is None
+        assert _parse_retry_after("") is None
+
+    def test_parse_http_date(self) -> None:
+        """HTTP-date form: 'Wed, 21 Oct 2015 07:28:00 GMT'. Always >= 0."""
+        from core.scraper import _parse_retry_after
+        # Past date → clamp to 0 (don't wait on stale hints).
+        result = _parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT")
+        assert result == 0.0
+
+    def test_parse_invalid_returns_none(self) -> None:
+        from core.scraper import _parse_retry_after
+        assert _parse_retry_after("not-a-number-or-date") is None

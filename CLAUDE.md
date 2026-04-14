@@ -104,7 +104,7 @@ Reset to 0 at the top of `fetch_chars_consistent` so an exception mid-call doesn
 
 **Ink-ratio validation** (post-denoise): if `ink_ratio > _INK_RATIO_MAX = 0.60`, re-binarize with strong Otsu + denoise. Real seal characters virtually never exceed ~50% ink coverage; this catches binarization failure on noisy/low-contrast scans. Dormant on baseline inputs (defense-in-depth).
 
-**Debug mode**: set `CharExtractor.debug_dir = path` to save per-stage PNGs (`01_normalized.png`, `02_binary.png`, `03_denoised.png`, `04_cropped.png`). Multi-char seals overwrite into the same dir — only the last char's intermediates remain. Use `SealGenerator.set_extract_debug_dir(path)` instead of touching the private attribute directly.
+**Debug mode**: set `CharExtractor.debug_dir = path` to save per-stage PNGs (`01_normalized.png`, `02_binary.png`, `03_denoised.png`, `04_cropped.png`). For multi-char seals, `generate()` nests per-char subdirs: `{path}/00_{char0}/01_normalized.png`, `{path}/01_{char1}/...`, etc. — same index allows distinguishing duplicate chars (e.g. `朝朝` → `00_朝/`, `01_朝/`). Use `SealGenerator.set_extract_debug_dir(path)` instead of touching the private attribute directly.
 
 ## Layout: Multi-phase pipeline
 
@@ -192,7 +192,7 @@ The regression runner derives a stable per-case seed via `MD5(test_id + attempt)
 | `SourceInconsistencyError` | strict mode rejected level > 2 | `text`, `level` |
 | `ExtractionFailedError` | extraction quality validation failed | `char`, `reason` |
 | `UpstreamApiError` | ygsf.com HTTP non-200 (non-429) | `status_code`, `detail` |
-| `RateLimitedError` | ygsf.com HTTP 429 | — |
+| `RateLimitedError` | ygsf.com HTTP 429 | `retry_after` (seconds, optional — from `Retry-After` header) |
 
 All inherit from `Exception`, so existing `except Exception` callers keep catching them. Currently raised at: scraper retry exhaustion (`_query_glyph_list`), CLI `--strict-consistency` check.
 

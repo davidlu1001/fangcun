@@ -143,3 +143,89 @@ class TestSealGeneratorPublicDebugAPI:
         gen = SealGenerator(no_api_cache=False)
         gen.set_extract_debug_dir(None)
         assert gen._extractor.debug_dir is None
+
+
+@pytest.mark.unit
+class TestMultiCharDebugNesting:
+    """P3#11: generate() nests per-char subdirs under set_extract_debug_dir.
+
+    Without this, every char overwrites 01_normalized.png / 02_binary.png etc.
+    so only the last char's intermediates survive.
+    """
+
+    def test_nests_per_char_subdirs(self, tmp_path, monkeypatch) -> None:
+        from core import SealGenerator
+
+        gen = SealGenerator(no_api_cache=True)
+        gen.set_extract_debug_dir(tmp_path)
+
+        # Stub the scraper to return 3 synthetic images without network.
+        fake_img = Image.fromarray(
+            np.full((200, 200), 255, dtype=np.uint8), "L"
+        )
+        fake_img_arr = np.array(fake_img)
+        fake_img_arr[50:150, 50:150] = 0
+        fake_img = Image.fromarray(fake_img_arr, "L")
+
+        def fake_fetch(text, seal_type):
+            n = len(text)
+            return (
+                [fake_img] * n,
+                "篆",
+                False,
+                ["字典"] * n,
+                [""] * n,
+                [],
+            )
+
+        monkeypatch.setattr(
+            gen._scraper, "fetch_chars_consistent", fake_fetch
+        )
+
+        # Capture what debug_dir each extract() call sees.
+        seen_dirs: list = []
+        real_extract = gen._extractor.extract
+
+        def spy_extract(img, source="字典", source_name=""):
+            seen_dirs.append(gen._extractor.debug_dir)
+            return real_extract(img, source=source, source_name=source_name)
+
+        monkeypatch.setattr(gen._extractor, "extract", spy_extract)
+
+        gen._prepare_placements("朝朝禅", "square", "baiwen", "leisure", 400)
+
+        assert len(seen_dirs) == 3
+        assert seen_dirs[0] == tmp_path / "00_朝"
+        assert seen_dirs[1] == tmp_path / "01_朝"  # duplicate char → distinct dir
+        assert seen_dirs[2] == tmp_path / "02_禅"
+        # debug_dir must be restored to the base after the loop.
+        assert gen._extractor.debug_dir == tmp_path
+
+    def test_preserves_none_when_no_debug_set(self, tmp_path, monkeypatch) -> None:
+        """When debug is off, per-char extract() sees debug_dir=None."""
+        from core import SealGenerator
+
+        gen = SealGenerator(no_api_cache=True)
+        # Do NOT call set_extract_debug_dir — debug_dir stays None.
+
+        fake_img = Image.fromarray(
+            np.full((200, 200), 255, dtype=np.uint8), "L"
+        )
+
+        def fake_fetch(text, seal_type):
+            return ([fake_img] * len(text), "篆", False,
+                    ["字典"] * len(text), [""] * len(text), [])
+
+        monkeypatch.setattr(gen._scraper, "fetch_chars_consistent", fake_fetch)
+
+        seen: list = []
+        real_extract = gen._extractor.extract
+
+        def spy(img, source="字典", source_name=""):
+            seen.append(gen._extractor.debug_dir)
+            return real_extract(img, source=source, source_name=source_name)
+
+        monkeypatch.setattr(gen._extractor, "extract", spy)
+        gen._prepare_placements("禅宗", "square", "baiwen", "leisure", 400)
+
+        assert seen == [None, None]

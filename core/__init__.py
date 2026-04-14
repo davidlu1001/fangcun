@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,22 @@ from .scraper import CalligraphyScraper, cache_info, clear_cache
 from .texture import StoneTexture
 
 logger = logging.getLogger(__name__)
+
+def _read_version_from_pyproject() -> str:
+    """Fallback when the package isn't installed (checkout without `pip install -e`)."""
+    try:
+        import tomllib
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        with pyproject.open("rb") as f:
+            return tomllib.load(f)["project"]["version"]
+    except (OSError, KeyError, ImportError):
+        return "0.0.0+unknown"
+
+
+try:
+    __version__ = _pkg_version("fangcun")
+except PackageNotFoundError:
+    __version__ = _read_version_from_pyproject()
 
 
 @dataclass(frozen=True)
@@ -250,11 +267,22 @@ class SealGenerator:
         consistency_level = getattr(self._scraper, "_last_consistency_level", 0)
 
         # ── 2. Extract character masks (source-aware) ────────
-        # source_name passed for Tier 1 印谱 whitelist detection
-        masks = [
-            self._extractor.extract(img, source=tab, source_name=src_name)
-            for img, tab, src_name in zip(raw_images, tab_sources, source_names)
-        ]
+        # source_name passed for Tier 1 印谱 whitelist detection.
+        # When debug_dir is set, nest per-char subdirs so intermediates
+        # from each char don't overwrite each other (P3#11).
+        base_debug = self._extractor.debug_dir
+        try:
+            masks = []
+            for idx, (img, tab, src_name, ch) in enumerate(
+                zip(raw_images, tab_sources, source_names, text)
+            ):
+                if base_debug is not None:
+                    self._extractor.debug_dir = base_debug / f"{idx:02d}_{ch}"
+                masks.append(
+                    self._extractor.extract(img, source=tab, source_name=src_name)
+                )
+        finally:
+            self._extractor.debug_dir = base_debug
 
         # ── 3. Layout ────────────────────────────────────────
         ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(shape, size, style, len(text))
@@ -348,8 +376,9 @@ class SealGenerator:
         When `path` is set, every extract() call saves intermediate PNGs:
           01_normalized.png, 02_binary.png, 03_denoised.png, 04_cropped.png
 
-        Multi-char seals overwrite into the same dir — only the last char's
-        intermediates remain. Set to None to disable.
+        For multi-char seals, `generate()` nests per-char subdirs:
+          {path}/00_{char0}/01_normalized.png, {path}/01_{char1}/..., etc.
+        Set to None to disable.
         """
         self._extractor.debug_dir = path
 
