@@ -97,75 +97,77 @@ def run_corpus(
     root_logger.setLevel(logging.DEBUG)
     root_logger.addHandler(capture)
 
-    results = []
+    results: list[dict] = []
     total = len(corpus)
 
-    for idx, case in enumerate(corpus, 1):
-        test_id = case["id"]
-        print(f"  [{idx}/{total}] {test_id}: {case['text']} ...", end=" ", flush=True)
+    try:
+        for idx, case in enumerate(corpus, 1):
+            test_id = case["id"]
+            print(f"  [{idx}/{total}] {test_id}: {case['text']} ...", end=" ", flush=True)
 
-        for attempt in range(2 if twice else 1):
-            suffix = f"_run{attempt + 1}" if twice else ""
-            capture.reset()
-            t0 = time.perf_counter()
+            for attempt in range(2 if twice else 1):
+                suffix = f"_run{attempt + 1}" if twice else ""
+                capture.reset()
+                t0 = time.perf_counter()
 
-            try:
-                result = gen.generate(
-                    text=case["text"],
-                    shape=case["shape"],
-                    style=case["style"],
-                    seal_type=case["seal_type"],
-                    grain=0.25,
-                    rotation=2.0,
-                    size=600,
-                )
-                elapsed = time.perf_counter() - t0
+                try:
+                    result = gen.generate(
+                        text=case["text"],
+                        shape=case["shape"],
+                        style=case["style"],
+                        seal_type=case["seal_type"],
+                        grain=0.25,
+                        rotation=2.0,
+                        size=600,
+                    )
+                    elapsed = time.perf_counter() - t0
 
-                # Save image
-                out_path = out_dir / f"{test_id}{suffix}.png"
-                result["image_preview"].save(out_path, "PNG")
+                    # Save image
+                    out_path = out_dir / f"{test_id}{suffix}.png"
+                    result["image_preview"].save(out_path, "PNG")
 
-                entry = {
-                    "id": test_id,
-                    "text": case["text"],
-                    "shape": case["shape"],
-                    "style": case["style"],
-                    "seal_type": case["seal_type"],
-                    "notes": case.get("notes", ""),
-                    "attempt": attempt + 1,
-                    "success": True,
-                    "elapsed_s": round(elapsed, 2),
-                    "font_used": result["font_used"],
-                    "font_fallback": result["font_fallback"],
-                    "warnings": result["warnings"],
-                    "logs": list(capture.records),
-                    "image_path": str(out_path.relative_to(OUTPUT_BASE)),
-                    "image_b64": _img_to_b64(result["image_preview"]),
-                }
-                print(f"OK ({elapsed:.1f}s)", flush=True)
+                    entry = {
+                        "id": test_id,
+                        "text": case["text"],
+                        "shape": case["shape"],
+                        "style": case["style"],
+                        "seal_type": case["seal_type"],
+                        "notes": case.get("notes", ""),
+                        "attempt": attempt + 1,
+                        "success": True,
+                        "elapsed_s": round(elapsed, 2),
+                        "font_used": result["font_used"],
+                        "font_fallback": result["font_fallback"],
+                        "warnings": result["warnings"],
+                        "logs": list(capture.records),
+                        "image_path": str(out_path.relative_to(OUTPUT_BASE)),
+                        "image_b64": _img_to_b64(result["image_preview"]),
+                    }
+                    print(f"OK ({elapsed:.1f}s)", flush=True)
 
-            except Exception as exc:
-                elapsed = time.perf_counter() - t0
-                entry = {
-                    "id": test_id,
-                    "text": case["text"],
-                    "shape": case["shape"],
-                    "style": case["style"],
-                    "seal_type": case["seal_type"],
-                    "notes": case.get("notes", ""),
-                    "attempt": attempt + 1,
-                    "success": False,
-                    "elapsed_s": round(elapsed, 2),
-                    "error": str(exc),
-                    "logs": list(capture.records),
-                    "image_b64": "",
-                }
-                print(f"FAIL: {exc}", flush=True)
+                except Exception as exc:
+                    elapsed = time.perf_counter() - t0
+                    entry = {
+                        "id": test_id,
+                        "text": case["text"],
+                        "shape": case["shape"],
+                        "style": case["style"],
+                        "seal_type": case["seal_type"],
+                        "notes": case.get("notes", ""),
+                        "attempt": attempt + 1,
+                        "success": False,
+                        "elapsed_s": round(elapsed, 2),
+                        "error": str(exc),
+                        "logs": list(capture.records),
+                        "image_b64": "",
+                    }
+                    print(f"FAIL: {exc}", flush=True)
 
-            results.append(entry)
+                results.append(entry)
+    finally:
+        root_logger.removeHandler(capture)
+        root_logger.setLevel(original_level)
 
-    root_logger.removeHandler(capture)
-    root_logger.setLevel(original_level)
     return results
 
 
@@ -188,7 +190,7 @@ def generate_report(results: list[dict], run_id: str) -> Path:
         params = f"{r['text']} | {r['style']} | {r['shape']} | {r['seal_type']}"
         meta = ""
         if r["success"]:
-            meta = f"font: {r.get('font_used', '?')}"
+            meta = f"font: {html.escape(str(r.get('font_used', '?')))}"
             if r.get("font_fallback"):
                 meta += " (FALLBACK)"
             if r.get("warnings"):
