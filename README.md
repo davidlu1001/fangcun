@@ -33,6 +33,8 @@ Fangcun — Chinese Seal Generator for Geek-Zen
 - **朱文冲边**：方章笔画穿过外框线（text_scale=0.98 + 4% bleed），椭圆章自动适配防裁剪
 - **三级缓存**：API 响应缓存 + 图片 CDN 缓存 + 选定图缓存，二次生成零网络请求
 - **双入口**：Gradio Web UI（交互）+ CLI（批量自动化 + 缓存管理 + 调试模式）
+- **质量保证**：63 项单元 + 回归测试，40 例视觉基线，纹理种子可复现，确定性逐字节验证
+- **类型化错误**：管线失败按场景细分（`UpstreamApiError`、`RateLimitedError`、`SourceInconsistencyError` 等），便于上游处理
 
 ## 快速开始
 
@@ -67,7 +69,15 @@ python cli.py --clear-cache    # 清除全部缓存
 python cli.py --no-api-cache --text "禅"   # 跳过缓存
 
 # 调试
-python cli.py --debug --text "卢修齐" --type name  # 详细日志
+python cli.py --debug --text "卢修齐" --type name  # 详细日志（候选列表、打分细节）
+python cli.py --text "禅" --debug-extract   # 保存提取中间步骤（normalized/binary/denoised/cropped）
+python cli.py --text "天人合一" --debug-layout  # 保存版面调试图（cell/ink bbox/centroid 叠加）
+
+# 可复现纹理（同 seed → 字节相同输出）
+python cli.py --text "禅" --seed 42 --output-dir ./out
+
+# 严格一致性（仅接受 Level 1-2 统一来源，否则报错）
+python cli.py --text "卢修齐" --type name --strict-consistency
 ```
 
 ### chars.txt 格式
@@ -130,6 +140,32 @@ cli.py               # CLI 批量入口 + 缓存管理 + --debug
 | API 响应 | `~/.seal_gen/cache/_api/` | JSON 字形列表 | 正缓存 30 天，负缓存 7 天 |
 | 图片 CDN | `~/.seal_gen/cache/_img/` | 候选图片 PNG | 无过期 |
 | 选定图 | `~/.seal_gen/cache/{char}_{font}_{tab}.png` | 最终选中图 | 无过期 |
+
+## 测试
+
+63 项测试覆盖单字提取、版面、渲染、纹理、字源选择、错误类型，外加 40 例视觉回归基线。
+
+```bash
+# 全部单元测试 + 回归测试
+uv run python -m pytest tests/ -v
+
+# 仅单元（快速，不联网）
+uv run python -m pytest tests/ -m unit
+
+# 仅回归（联网或命中缓存）
+uv run python -m pytest tests/ -m regression
+
+# 视觉回归套件（生成 40 例 + HTML 报告）
+uv run python tests/regression/run.py --run-id baseline
+# → tests/regression/output/baseline/report.html
+
+# 对比两次运行（本次改动 vs baseline）
+uv run python tests/regression/run.py --run-id my_change
+uv run python tests/regression/compare.py baseline my_change
+# → tests/regression/output/compare_baseline_vs_my_change.html
+```
+
+回归套件用 MD5 衍生的固定 seed 保证字节级可复现：相同代码 + 相同缓存 → 相同输出。
 
 ## 部署
 

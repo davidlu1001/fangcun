@@ -16,6 +16,10 @@ core/
 └── texture.py       # 6-layer texture: pressure, roughness, chipping, grain, ink pooling, color drift
 app.py               # Gradio Web UI (主入口)
 cli.py               # CLI batch entry with rich progress + cache management + --debug (次入口)
+core/errors.py       # Typed pipeline failure modes (SealError + 5 subclasses)
+tests/               # 63 unit + regression tests (pytest)
+tests/regression/    # 40-case visual regression harness + runner + compare tool
+docs/plans/          # Implementation plans + audit reports
 ```
 
 ## Scraper: source intelligence
@@ -60,6 +64,19 @@ When `len(set(text)) == 1` (禅, 朝朝), skip Pass 2 unified source check entir
 
 When `_try_unified_source_from_candidates` picks a unified source that has multiple variants for one char (e.g. 中国篆刻大字典 ships both a thin and a thick 知), the default "first-per-source" rule can pair a thin 知 with a thick 足 and produce visual imbalance. R12 fixes this: after `best_source` is chosen, collect the relative stroke width (`p70 × 2 / min_dim`) of each **unambiguous** sibling (only one eligible variant within ±5 score of its top) as the anchor. For each ambiguous char, pick the variant whose relative stroke width is closest to the anchor median. Falls back to median of top variants if every sibling is ambiguous. Logged as `[R12] 笔画匹配`.
 
+**R12 anchor extreme-aspect filter**: chars with aspect > 2.5 or < 0.4 (一, 三, etc.) are excluded from the anchor pool. Their `rel_sw ≈ 1.0` — the entire char IS the stroke — would poison the median target. Three-tier fallback: unambiguous + non-extreme → all + non-extreme → all (handles `text="一"` edge case). Constants: `_R12_EXTREME_ASPECT_HI = 2.5`, `_R12_EXTREME_ASPECT_LO = 0.4`. Deviation above `R12_STROKE_DEVIATION_WARN = 0.20` logs WARNING; per-char summary always logged at INFO via `[R12] 笔画匹配总结`.
+
+### Consistency level (1-5)
+
+`SealGenerator.generate()` returns `consistency_level` indicating which fallback path produced the source selection:
+- L1: unified source (n=5) or single/repeated-char short-circuit
+- L2: unified source (n=10 wider pool)
+- L3: majority source (>50% coverage)
+- L4: minimum-loss source
+- L5: per-char internal assembly (`_force_assemble_single_font` for name) or Pass 2 multi-font assembly
+
+Reset to 0 at the top of `fetch_chars_consistent` so an exception mid-call doesn't surface stale state. CLI flag `--strict-consistency` raises `SourceInconsistencyError` if level > 2.
+
 ### Three-tier cache
 
 - Tier 1: API response JSON (`_api/`) — MD5 key, 30d/7d TTL
@@ -85,6 +102,10 @@ When `_try_unified_source_from_candidates` picks a unified source that has multi
 
 **Binarization**: Otsu for 字典/本地; bilateral filter + adaptive for 真迹.
 
+**Ink-ratio validation** (post-denoise): if `ink_ratio > _INK_RATIO_MAX = 0.60`, re-binarize with strong Otsu + denoise. Real seal characters virtually never exceed ~50% ink coverage; this catches binarization failure on noisy/low-contrast scans. Dormant on baseline inputs (defense-in-depth).
+
+**Debug mode**: set `CharExtractor.debug_dir = path` to save per-stage PNGs (`01_normalized.png`, `02_binary.png`, `03_denoised.png`, `04_cropped.png`). Multi-char seals overwrite into the same dir — only the last char's intermediates remain. Use `SealGenerator.set_extract_debug_dir(path)` instead of touching the private attribute directly.
+
 ## Layout: Multi-phase pipeline
 
 `SealLayout.arrange()` runs six phases:
@@ -99,6 +120,8 @@ When `_try_unified_source_from_candidates` picks a unified source that has multi
 **Dynamic margins**: `MARGIN_TABLE` by (style, shape).
 
 **Zhuwen bleed**: 4% bleed with `margin=0` lets chars cross frame lines.
+
+**Debug visualization**: `SealLayout.debug_render(placements, canvas_size)` returns an RGBA overlay with blue cell rectangles, red ink bounding boxes, green pixel-weighted centroids. Use `SealGenerator.render_layout_debug(text, ...)` instead of touching the private attribute directly.
 
 ## Renderer: text_scale by context
 
@@ -139,7 +162,39 @@ python cli.py --cache-info              # show cache stats
 python cli.py --clear-cache             # purge all cached data
 python cli.py --no-api-cache            # bypass cache for this run
 python cli.py --debug --text "卢修齐" --type name  # verbose diagnostics
+python cli.py --text "禅" --debug-extract           # save extractor intermediates
+python cli.py --text "天人合一" --debug-layout       # save layout overlay (cells/ink/centroid)
+python cli.py --text "禅" --seed 42                  # reproducible texture
+python cli.py --text "卢修齐" --type name --strict-consistency  # require Level 1-2 source
 ```
+
+## Testing
+
+63 unit + regression tests under `tests/`. Pytest config in `pyproject.toml` uses `filterwarnings = "error"` (with PIL/opencc whitelisted), `--strict-markers`, and a session-scoped `gen` fixture in `tests/regression/conftest.py`.
+
+```bash
+uv run python -m pytest tests/ -q                       # all 63 tests
+uv run python -m pytest tests/ -m unit                  # fast, no network
+uv run python -m pytest tests/ -m regression            # uses cache + SealGenerator
+uv run python tests/regression/run.py --run-id baseline # 40-case visual baseline
+uv run python tests/regression/compare.py A B           # side-by-side HTML diff
+```
+
+The regression runner derives a stable per-case seed via `MD5(test_id + attempt)` so output is byte-reproducible across separate processes (Python's `hash()` is randomized via PYTHONHASHSEED, so it's not used). Determinism audit at `docs/plans/determinism-audit-2026-04-14.md` confirmed 9/9 byte-identical across processes.
+
+## Errors
+
+`core/errors.py` defines typed pipeline failures, all inheriting from `SealError`:
+
+| Class | When | Carries |
+|---|---|---|
+| `CharNotFoundError` | char missing across all priority scripts | `char`, `scripts_tried` |
+| `SourceInconsistencyError` | strict mode rejected level > 2 | `text`, `level` |
+| `ExtractionFailedError` | extraction quality validation failed | `char`, `reason` |
+| `UpstreamApiError` | ygsf.com HTTP non-200 (non-429) | `status_code`, `detail` |
+| `RateLimitedError` | ygsf.com HTTP 429 | — |
+
+All inherit from `Exception`, so existing `except Exception` callers keep catching them. Currently raised at: scraper retry exhaustion (`_query_glyph_list`), CLI `--strict-consistency` check.
 
 ## Dependencies
 
@@ -152,3 +207,7 @@ python cli.py --debug --text "卢修齐" --type name  # verbose diagnostics
 - Local font fallback: serif preferred (思源宋体 > 黑体)
 - Extreme-aspect chars use reverse construction; normal chars use equal-ratio + conditional stretch
 - 留红即设计: single-char-per-column whitespace is intentional (traditional 章法)
+- Public debug API: use `SealGenerator.set_extract_debug_dir()` and `SealGenerator.render_layout_debug()`, not `gen._extractor.debug_dir = ...`
+- New failure modes go through `core.errors` (typed) — `ValueError` reserved for programmer errors (invalid hex color, empty text)
+- Tests with fixture `gen` belong under `tests/regression/` (network/cache); pure unit tests at top-level `tests/`
+- Pipeline assertion in `core/__init__.py`: baiwen → opaque > 0.5, zhuwen → transparent > 0.2 (post-render, pre-texture). Catches yin/yang mixing bugs in debug mode (`__debug__`).
