@@ -124,12 +124,16 @@ AES_KEY = b"PkT!ihpN^QkQ62k%"
 
 # R12 stroke-width deviation threshold for warning-level logs. 20% is the
 # empirical eye-noticeable imbalance threshold for two-char balanced seals
-# (the case R12 was designed to fix). For seals containing extreme-aspect
-# chars (一, 三), this threshold can be noisy because the extreme char's
-# rel_sw is its own stroke width and inflates the median target.
-# TODO: filter extreme-aspect chars from the anchor median upstream
-# at _try_unified_source_from_candidates anchor computation.
+# (the case R12 was designed to fix).
 R12_STROKE_DEVIATION_WARN = 0.20
+
+# R12 anchor eligibility: chars with extreme aspect ratios (一, 三 → wide;
+# tall narrow chars → vertical) have rel_sw ≈ 1.0 because the whole image
+# IS the stroke. Including them in the anchor median poisons the target and
+# makes normally-proportioned siblings register as huge deviations.
+# Thresholds mirror the extreme-detection bounds in core/layout.py (~L122).
+_R12_EXTREME_ASPECT_HI = 2.5
+_R12_EXTREME_ASPECT_LO = 0.4
 
 # Tab priority: 字典 first (clean, seal-optimized), 真迹 second (original, noisier).
 # 字库 (type=1) is deliberately excluded — digital font glyphs are unusable.
@@ -659,12 +663,24 @@ class CalligraphyScraper:
             elig = [v for v in variants if v[1] >= top_score - 5.0]
             eligible_per_char.append(elig)
 
+        # Anchor pool: prefer unambiguous siblings (only one eligible variant),
+        # and exclude extreme-aspect chars (一, 三, etc.) whose rel_sw ≈ 1.0
+        # would poison the median. Three-tier fallback handles edge cases like
+        # text="一" (only extreme chars exist).
         anchor_sws = [
             self._relative_stroke_width(elig[0][0])
             for elig in eligible_per_char
-            if len(elig) == 1
+            if len(elig) == 1 and self._is_anchor_eligible(elig[0][0])
         ]
         if not anchor_sws:
+            # Relax the unambiguous requirement, keep the extreme-aspect filter
+            anchor_sws = [
+                self._relative_stroke_width(elig[0][0])
+                for elig in eligible_per_char
+                if self._is_anchor_eligible(elig[0][0])
+            ]
+        if not anchor_sws:
+            # Only extreme chars exist (e.g. text="一一") — use them anyway
             anchor_sws = [
                 self._relative_stroke_width(elig[0][0])
                 for elig in eligible_per_char
@@ -716,6 +732,24 @@ class CalligraphyScraper:
             )
 
         return images, tabs_, src_names, best_source
+
+    @staticmethod
+    def _is_anchor_eligible(img: Image.Image) -> bool:
+        """Is this char eligible as an R12 stroke-width anchor?
+
+        Anchor chars must have a non-extreme aspect ratio. Extreme-aspect
+        chars (一 → wide, some narrow chars → tall) have rel_sw ≈ 1.0
+        because their entire image IS the stroke; including them in the
+        anchor median inflates the target and makes siblings register as
+        spuriously high deviation. Thresholds match the layout module's
+        extreme-detection bounds (core/layout.py:122-125) so the definition
+        of "extreme" stays consistent across the pipeline.
+        """
+        w, h = img.size
+        if h == 0:
+            return False
+        aspect = w / h
+        return _R12_EXTREME_ASPECT_LO <= aspect <= _R12_EXTREME_ASPECT_HI
 
     @staticmethod
     def _relative_stroke_width(img: Image.Image) -> float:
