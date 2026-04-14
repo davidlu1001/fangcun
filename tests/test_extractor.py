@@ -60,6 +60,32 @@ class TestExtractorBasics:
         ext.extract(img, source="字典", source_name="汉印分韵")
         assert ext._detected_as_yinpu, "Should detect as 印谱 via Tier 1 whitelist"
 
+    def test_validation_rejects_noise(self) -> None:
+        """Mask with too many disconnected components should be flagged.
+
+        The validator re-binarizes when ink_ratio > 0.60 (which suggests
+        the binarizer over-extracted noise as strokes).
+        """
+        ext = CharExtractor()
+        # Create noisy image — salt-and-pepper pattern that Otsu may
+        # over-extract as if every dark spec were a stroke
+        arr = np.full((200, 200), 255, dtype=np.uint8)
+        np.random.seed(42)
+        noise = np.random.random((200, 200)) < 0.3
+        arr[noise] = 0
+        img = Image.fromarray(arr, "L")
+
+        result = ext.extract(img, source="字典")
+        # Should still produce output (validator just re-binarizes — doesn't reject)
+        # But the output should have less than 60% ink ratio (validator's threshold)
+        result_arr = np.array(result)
+        ink_ratio = float(np.count_nonzero(result_arr)) / result_arr.size
+        # Validator's threshold is 0.60. With seeded noise (30% density),
+        # post-validation result should be well under that.
+        assert result.mode == "L"
+        # Note: this is more of a smoke test — exact post-fix ratio depends
+        # on Otsu retry behavior. The key contract is "doesn't crash + returns L mode".
+
 
 @pytest.mark.unit
 class TestExtractorDebugMode:

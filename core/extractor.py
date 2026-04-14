@@ -24,6 +24,7 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 _MIN_STROKE_PIXELS = 50
+_INK_RATIO_MAX = 0.60  # Real seal characters virtually never exceed ~50% ink coverage
 
 # ── Known 印谱 sources (Tier 1 whitelist) ────────────────────
 # O(1) lookup. Only add sources after empirical confirmation.
@@ -97,6 +98,23 @@ class CharExtractor:
 
         if self.debug_dir:
             Image.fromarray(binary, "L").save(self.debug_dir / "03_denoised.png")
+
+        # Step 4.5: validation — if ink_ratio is pathological, re-binarize
+        # with strong denoise. Catches cases where Otsu over-extracted noise
+        # (e.g., low-contrast scans, busy backgrounds) producing >60% ink.
+        # Real seal characters virtually never exceed ~50% ink coverage.
+        stroke_count = int(np.count_nonzero(binary))
+        ink_ratio = stroke_count / binary.size if binary.size > 0 else 0.0
+        if ink_ratio > _INK_RATIO_MAX:
+            logger.warning(
+                "ink_ratio=%.2f (>%.2f) — possible extraction failure, re-binarizing with strong denoise",
+                ink_ratio, _INK_RATIO_MAX,
+            )
+            binary = self._binarize_otsu(gray)
+            binary = self._denoise(binary, strong=True)
+            if self.debug_dir:
+                # Re-save 03_denoised.png with the post-validation binary
+                Image.fromarray(binary, "L").save(self.debug_dir / "03_denoised.png")
 
         # Step 5: crop to bounding box
         cropped = self._crop_bbox(binary)
