@@ -21,17 +21,33 @@ from PIL import Image, ImageFilter
 class StoneTexture:
     """Apply gold-and-stone (金石) texture effects to a rendered seal image."""
 
-    def apply(self, img: Image.Image, grain_strength: float = 0.25) -> Image.Image:
+    def apply(
+        self,
+        img: Image.Image,
+        grain_strength: float = 0.25,
+        seed: int | None = None,
+    ) -> Image.Image:
         """
         Args:
             img:            RGBA seal image
             grain_strength: 0.0 = clean digital, 1.0 = maximum roughness
+            seed:           optional RNG seed for reproducible texture output.
+                            When provided, seeds the global numpy RNG so all
+                            six noise layers (pressure, roughness, chipping,
+                            grain, drift, pooling) produce identical results
+                            across runs. NOTE: mutates global numpy random
+                            state — acceptable for single-threaded CLI/Gradio
+                            use; callers needing isolation should snapshot
+                            `np.random.get_state()` before invocation.
 
         Returns:
             New RGBA image with texture applied.
         """
         if grain_strength <= 0.0:
             return img.copy()
+
+        if seed is not None:
+            np.random.seed(seed)
 
         arr = np.array(img, dtype=np.uint8).copy()
         alpha = arr[:, :, 3].copy()

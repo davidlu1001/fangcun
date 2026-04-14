@@ -75,6 +75,12 @@ def _parse_args() -> argparse.Namespace:
         "--rotation", type=float, default=2.0, help="旋转角度° (default: 2.0)"
     )
     p.add_argument("--size", type=int, default=600, help="短边像素 (default: 600)")
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="随机种子（纹理可复现；缺省为每次随机）",
+    )
 
     # Output
     p.add_argument(
@@ -126,6 +132,7 @@ def _generate_one(
             grain=args.grain,
             rotation=args.rotation,
             size=args.size,
+            seed=args.seed,
         )
 
         # Save transparent PNG

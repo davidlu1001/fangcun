@@ -55,6 +55,7 @@ class SealGenerator:
         grain: float = 0.25,
         rotation: float = 2.0,
         size: int = 600,
+        seed: int | None = None,
     ) -> dict:
         """
         Generate a complete seal image.
@@ -68,6 +69,7 @@ class SealGenerator:
             grain:     texture strength 0.0–1.0
             rotation:  rotation angle in degrees
             size:      short-side pixels
+            seed:      optional RNG seed for reproducible texture output
 
         Returns:
             dict with keys: image_transparent, image_preview,
@@ -117,7 +119,7 @@ class SealGenerator:
         seal = self._renderer.render(placements, shape, style, color_rgb, size)
 
         # ── 5. Texture ───────────────────────────────────────
-        seal = self._texture.apply(seal, grain)
+        seal = self._texture.apply(seal, grain, seed=seed)
 
         # ── 6. Rotation ──────────────────────────────────────
         if rotation != 0.0:
