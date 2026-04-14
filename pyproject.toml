@@ -27,6 +27,12 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers --strict-config -ra"
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:PIL.*",
+    "ignore::DeprecationWarning:opencc.*",
+]
 markers = [
     "regression: visual regression tests (require network + cache)",
     "unit: fast isolated unit tests",
