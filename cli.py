@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rich.console import Console
@@ -89,6 +91,15 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default="./seals",
         help="输出目录 (default: ./seals)",
+    )
+    p.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help=(
+            "并发 worker 数 (default: 1, 仅批量模式生效). "
+            "推荐值: 2-4. 注意：每个 worker 独立发起上游请求，并发过高易触发限流"
+        ),
     )
     p.add_argument(
         "--format",
@@ -279,7 +290,15 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    gen = SealGenerator(no_api_cache=args.no_api_cache)
+    # Each worker thread gets its own SealGenerator — the scraper keeps
+    # per-call state (_last_consistency_level, _current_seal_type) that
+    # would race under shared access. HTTP sessions are cheap to re-create.
+    _tls = threading.local()
+
+    def _get_gen() -> SealGenerator:
+        if not hasattr(_tls, "gen"):
+            _tls.gen = SealGenerator(no_api_cache=args.no_api_cache)
+        return _tls.gen
 
     if not args.text and not args.batch:
         console.print("[red]请指定 --text 或 --batch[/red]")
@@ -302,8 +321,14 @@ def main() -> None:
         console.print("[red]无有效输入文字[/red]")
         sys.exit(1)
 
+    # Clamp --jobs to something sane and to single-item batches.
+    jobs = max(1, args.jobs)
+    if len(texts) == 1:
+        jobs = 1
+
     console.print(f"\n[bold]极客禅 · 印章生成器[/bold]")
-    console.print(f"共 {len(texts)} 枚印章待生成\n")
+    suffix = f" (并发 {jobs} worker)" if jobs > 1 else ""
+    console.print(f"共 {len(texts)} 枚印章待生成{suffix}\n")
 
     success = 0
     with Progress(
@@ -315,11 +340,24 @@ def main() -> None:
     ) as progress:
         task = progress.add_task("生成中...", total=len(texts))
 
-        for text in texts:
-            progress.update(task, description=f"[cyan]{text}[/cyan]")
-            if _generate_one(gen, text, args, output_dir):
-                success += 1
-            progress.advance(task)
+        if jobs == 1:
+            for text in texts:
+                progress.update(task, description=f"[cyan]{text}[/cyan]")
+                if _generate_one(_get_gen(), text, args, output_dir):
+                    success += 1
+                progress.advance(task)
+        else:
+            def _worker(text: str) -> tuple[str, bool]:
+                return text, _generate_one(_get_gen(), text, args, output_dir)
+
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                futures = [pool.submit(_worker, t) for t in texts]
+                for fut in as_completed(futures):
+                    text, ok = fut.result()
+                    progress.update(task, description=f"[cyan]{text}[/cyan]")
+                    if ok:
+                        success += 1
+                    progress.advance(task)
 
     console.print(f"\n[bold green]完成:[/bold green] {success}/{len(texts)} 枚成功")
     console.print(f"[dim]输出目录: {output_dir.resolve()}[/dim]\n")

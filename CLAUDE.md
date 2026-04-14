@@ -166,6 +166,7 @@ python cli.py --text "禅" --debug-extract           # save extractor intermedia
 python cli.py --text "天人合一" --debug-layout       # save layout overlay (cells/ink/centroid)
 python cli.py --text "禅" --seed 42                  # reproducible texture
 python cli.py --text "卢修齐" --type name --strict-consistency  # require Level 1-2 source
+python cli.py --batch chars.txt --jobs 3                         # 3 concurrent workers (thread-local SealGenerator per worker)
 ```
 
 ## Testing
