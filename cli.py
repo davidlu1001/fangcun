@@ -26,6 +26,7 @@ from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from core import SealGenerator, cache_info, clear_cache
+from core.errors import SourceInconsistencyError
 
 console = Console()
 
@@ -155,11 +156,7 @@ def _generate_one(
         )
 
         if args.strict_consistency and result.get("consistency_level", 0) > 2:
-            # TODO(Task 5.1): replace with SourceInconsistencyError from core.errors
-            raise ValueError(
-                f"严格一致性检查失败: consistency_level="
-                f"{result['consistency_level']}（要求 ≤ 2）"
-            )
+            raise SourceInconsistencyError(text, result["consistency_level"])
 
         # Save transparent PNG
         filename = f"{text}_{args.style}_{args.shape}.png"
