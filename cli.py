@@ -111,6 +111,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="启用详细调试日志（候选列表、打分细节）",
     )
+    p.add_argument(
+        "--strict-consistency",
+        action="store_true",
+        help="严格一致性模式：仅接受 Level 1-2 统一来源",
+    )
 
     return p.parse_args()
 
@@ -134,6 +139,12 @@ def _generate_one(
             size=args.size,
             seed=args.seed,
         )
+
+        if args.strict_consistency and result.get("consistency_level", 0) > 2:
+            raise ValueError(
+                f"严格一致性检查失败: consistency_level="
+                f"{result['consistency_level']}（要求 ≤ 2）"
+            )
 
         # Save transparent PNG
         filename = f"{text}_{args.style}_{args.shape}.png"

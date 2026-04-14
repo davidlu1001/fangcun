@@ -99,6 +99,7 @@ class SealGenerator:
         )
         warnings.extend(fetch_warnings)
         font_display = font_used
+        consistency_level = getattr(self._scraper, "_last_consistency_level", 0)
 
         # ── 2. Extract character masks (source-aware) ────────
         # source_name passed for Tier 1 印谱 whitelist detection
@@ -162,6 +163,8 @@ class SealGenerator:
             "font_used": font_display,
             "font_fallback": any_fallback,
             "warnings": warnings,
+            "consistency_level": consistency_level,
+            "source_names": list(source_names),
         }
 
 

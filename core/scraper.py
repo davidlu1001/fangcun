@@ -331,6 +331,14 @@ class CalligraphyScraper:
         self._session = requests.Session()
         self._no_api_cache = no_api_cache
         self._current_seal_type = "leisure"  # set by fetch_chars_consistent
+        # Consistency level of the most recent fetch_chars_consistent call.
+        # 1 = unified source in n=5 pool (or single/repeated char short-circuit)
+        # 2 = unified source in n=10 pool
+        # 3 = majority source fallback (>50% coverage from one source)
+        # 4 = minimum-style-loss fallback
+        # 5 = per-char best / multi-font assembly / strict force-assemble
+        # 0 = not yet populated
+        self._last_consistency_level: int = 0
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         API_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         IMG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -357,6 +365,7 @@ class CalligraphyScraper:
         self._current_seal_type = seal_type
         warnings: list[str] = []
         best_fallback = None  # "chars found but no unified source" backup
+        best_fallback_level = 0  # 3 = majority, 4 = min-loss
 
         # ── R9+R10: single/repeated char short-circuit ──────
         # When all chars are the same (禅, 朝朝), skip Pass 2 unified
@@ -397,6 +406,7 @@ class CalligraphyScraper:
                     "[R9+R10] 单字短路: text='%s' font=%s src=%s",
                     text, font_style, sel_src,
                 )
+                self._last_consistency_level = 1
                 return self._log_final(
                     text, (images, font_style, False, tabs, src_names, [])
                 )
@@ -439,6 +449,7 @@ class CalligraphyScraper:
                 warnings.append(f"统一来源: {u_source}")
                 if idx > 0:
                     warnings.append(f"首选{priority[0]}降级至{font_style}")
+                self._last_consistency_level = 1
                 return self._log_final(text, (u_images, font_style, idx > 0, u_tabs, u_srcs, warnings))
 
             logger.debug("n=5 无统一来源, 扩大至 n=10")
@@ -458,6 +469,7 @@ class CalligraphyScraper:
                 warnings.append(f"统一来源: {u_source}")
                 if idx > 0:
                     warnings.append(f"首选{priority[0]}降级至{font_style}")
+                self._last_consistency_level = 2
                 return self._log_final(text, (u_images, font_style, idx > 0, u_tabs, u_srcs, warnings))
 
             # ★ Deferred: chars found but no unified source → save as fallback
@@ -481,6 +493,7 @@ class CalligraphyScraper:
                     best_fallback = (
                         m_images, font_style, idx > 0, m_tabs, m_srcs, fb_warnings
                     )
+                    best_fallback_level = 3
                 else:
                     msl = self._min_style_loss_fallback(text, all_cands_wide)
                     if msl is not None:
@@ -493,12 +506,15 @@ class CalligraphyScraper:
                         best_fallback = (
                             s_images, font_style, idx > 0, s_tabs, s_srcs, fb_warnings
                         )
+                        best_fallback_level = 4
 
             # continue to next font — don't return!
 
         # All fonts tried, no perfect unified source
         if best_fallback is not None:
             logger.warning("所有字体无完美统一来源, 启用最优备胎: %s", best_fallback[1])
+            # best_fallback_level was set alongside best_fallback (3 or 4)
+            self._last_consistency_level = best_fallback_level or 4
             return self._log_final(text, best_fallback)
 
         # ── Pass 2: no single style covers all — find best coverage ──
@@ -508,6 +524,9 @@ class CalligraphyScraper:
             logger.warning(
                 "严格字体模式 (%s): 在 %s 内部强制组装", seal_type, priority
             )
+            # Per-char-internal assembly within a single font — sources may
+            # differ per char, so this is level 5.
+            self._last_consistency_level = 5
             return self._log_final(text, self._force_assemble_single_font(text, priority[0]))
 
         logger.warning("No single font style covers all chars in '%s'", text)
@@ -564,6 +583,8 @@ class CalligraphyScraper:
         warnings.append(
             f"书体不统一：主体{best_style}，但 {', '.join(mixed_chars)}"
         )
+        # Multi-font assembly: worst case — different scripts, different sources
+        self._last_consistency_level = 5
         return self._log_final(text, (images, best_style, True, tabs, src_names, warnings))
 
     # ── unified source selection ────────────────────────────
