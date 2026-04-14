@@ -58,24 +58,31 @@ class SealGenerator:
         rotation: float = 2.0,
         size: int = 600,
         seed: int | None = None,
+        return_debug: bool = False,
     ) -> dict:
         """
         Generate a complete seal image.
 
         Args:
-            text:      seal characters (1–4 recommended)
-            shape:     'oval' | 'square'
-            style:     'baiwen' | 'zhuwen'
-            seal_type: 'leisure' | 'name'
-            color:     hex color string, e.g. '#B22222'
-            grain:     texture strength 0.0–1.0
-            rotation:  rotation angle in degrees
-            size:      short-side pixels
-            seed:      optional RNG seed for reproducible texture output
+            text:         seal characters (1–4 recommended)
+            shape:        'oval' | 'square'
+            style:        'baiwen' | 'zhuwen'
+            seal_type:    'leisure' | 'name'
+            color:        hex color string, e.g. '#B22222'
+            grain:        texture strength 0.0–1.0
+            rotation:     rotation angle in degrees
+            size:         short-side pixels
+            seed:         optional RNG seed for reproducible texture output
+            return_debug: if True, include `image_layout_debug` (RGBA overlay
+                          showing cell boundaries, ink bboxes, centroids) in
+                          the result. Cheap — reuses the same placements,
+                          no pipeline re-run.
 
         Returns:
             dict with keys: image_transparent, image_preview,
-                           font_used, font_fallback, warnings
+                           font_used, font_fallback, warnings,
+                           consistency_level, source_names
+                           (+ image_layout_debug if return_debug=True)
         """
         prep = self._prepare_placements(text, shape, style, seal_type, size)
         rendered = self._render_and_texture(
@@ -88,7 +95,7 @@ class SealGenerator:
             size=size,
             seed=seed,
         )
-        return {
+        result = {
             **rendered,
             "font_used": prep["font_used"],
             "font_fallback": prep["font_fallback"],
@@ -96,6 +103,12 @@ class SealGenerator:
             "consistency_level": prep["consistency_level"],
             "source_names": prep["source_names"],
         }
+        if return_debug:
+            canvas_w, canvas_h = SealRenderer.canvas_dimensions(shape, size)
+            result["image_layout_debug"] = self._layout.debug_render(
+                prep["placements"], (canvas_w, canvas_h),
+            )
+        return result
 
     def generate_variants(
         self,
@@ -314,34 +327,21 @@ class SealGenerator:
         seal_type: str = "leisure",
         size: int = 600,
     ) -> Image.Image:
-        """Render a debug overlay (cells / ink bboxes / centroids) for the layout
-        that the same parameters would produce.
+        """Render a standalone layout debug overlay.
 
-        This re-runs the scraper + extractor + layout pipeline (re-fetching
-        from cache; no extra network) but skips renderer/texture/rotation.
-        Re-running the pipeline is an acceptable trade-off for debug-only use.
+        Runs scraper → extractor → layout (but not renderer/texture/rotation).
+        Cache-backed, so no network cost after first run. If you also want the
+        actual seal, prefer `generate(..., return_debug=True)` which gives you
+        both in one prepare pass.
+
         Returns an RGBA image at canvas dimensions with:
           - Blue rectangles: cell boundaries
           - Red rectangles: ink bounding boxes
           - Green dots: pixel-weighted centroids
-
-        Use cases: debugging layout phase decisions (extreme-aspect handling,
-        centroid offsets, cell vs ink overflow).
         """
-        raw_images, _, _, tab_sources, source_names, _ = (
-            self._scraper.fetch_chars_consistent(text, seal_type)
-        )
-        masks = [
-            self._extractor.extract(img, source=tab, source_name=src)
-            for img, tab, src in zip(raw_images, tab_sources, source_names)
-        ]
-        ta_x, ta_y, ta_w, ta_h = SealRenderer.text_area(shape, size, style, len(text))
-        placements = self._layout.arrange(masks, shape, (ta_w, ta_h), style)
-        for p in placements:
-            p["x"] += ta_x
-            p["y"] += ta_y
+        prep = self._prepare_placements(text, shape, style, seal_type, size)
         canvas_w, canvas_h = SealRenderer.canvas_dimensions(shape, size)
-        return self._layout.debug_render(placements, (canvas_w, canvas_h))
+        return self._layout.debug_render(prep["placements"], (canvas_w, canvas_h))
 
 
 def _hex_to_rgb(hex_str: str) -> tuple[int, int, int]:

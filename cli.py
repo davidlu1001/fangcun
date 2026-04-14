@@ -142,6 +142,9 @@ def _generate_one(
             output_dir / f"{text}_debug" if args.debug_extract else None
         )
 
+        # When --debug-layout is set, generate() returns the overlay alongside
+        # the seal from the SAME prepare pass — avoids a second scraper+extract
+        # round-trip compared to calling render_layout_debug separately.
         result = gen.generate(
             text=text,
             shape=args.shape,
@@ -152,6 +155,7 @@ def _generate_one(
             rotation=args.rotation,
             size=args.size,
             seed=args.seed,
+            return_debug=args.debug_layout,
         )
 
         if args.strict_consistency and result.get("consistency_level", 0) > 2:
@@ -173,16 +177,9 @@ def _generate_one(
 
         console.print(f"  [dim]→ {out_path}[/dim]")
 
-        if args.debug_layout:
-            debug_overlay = gen.render_layout_debug(
-                text=text,
-                shape=args.shape,
-                style=args.style,
-                seal_type=args.seal_type,
-                size=args.size,
-            )
+        if args.debug_layout and "image_layout_debug" in result:
             debug_path = output_dir / f"{text}_layout.png"
-            debug_overlay.save(debug_path, "PNG")
+            result["image_layout_debug"].save(debug_path, "PNG")
             console.print(f"  [dim]→ layout debug: {debug_path}[/dim]")
 
         return True
