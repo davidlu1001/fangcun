@@ -147,7 +147,27 @@ class StoneTexture:
             + ((w_grid - cx) / max(w / 2.0, 1)) ** 2
         )
         edge_boost = np.clip((radial - 0.75) / 0.25, 0, 1).astype(np.float32)
-        combined_prob = blurred + edge_boost * 0.15
+
+        # 3b. Corner proximity: real seals wear most at the four corners
+        # (storage bumps + initial stamp contact). Both normalized axes
+        # must be near 1.0 simultaneously to qualify — edges have high
+        # ny OR nx but not both. Use min(ny,nx) which is only near 1.0
+        # at the four corners (edges have min≈0).
+        ny = np.abs(h_grid - cy) / max(h / 2.0, 1)
+        nx = np.abs(w_grid - cx) / max(w / 2.0, 1)
+        corner_closeness = np.minimum(ny, nx).astype(np.float32)
+        # Kick in within ~15% of the corner (corner_closeness > 0.85)
+        corner_boost = np.clip(
+            (corner_closeness - 0.85) / 0.15, 0, 1
+        ).astype(np.float32)
+
+        # Cap total additive boost at 0.25 (subtle, not cartoonish).
+        # At a corner both terms fire: edge_boost~1 → 0.15, corner_boost~1
+        # → +0.18 more → capped at 0.25. Edges get only 0.15.
+        total_boost = np.minimum(
+            edge_boost * 0.15 + corner_boost * 0.18, 0.25
+        )
+        combined_prob = blurred + total_boost
 
         # 4. Conservative threshold (legibility over art)
         threshold = 1.0 - strength * 0.25
@@ -310,9 +330,23 @@ class StoneTexture:
             return arr
 
         darken_amount = strength * 30.0
+
+        # Low-frequency multiplicative noise: real ink pools unevenly,
+        # with splotches of deeper ink rather than uniform interior darkening.
+        h, w = alpha.shape
+        raw = np.random.randn(h, w).astype(np.float32)
+        low_freq = cv2.GaussianBlur(raw, (0, 0), sigmaX=15, sigmaY=15)
+        lf_min, lf_max = low_freq.min(), low_freq.max()
+        if lf_max > lf_min:
+            low_freq = (low_freq - lf_min) / (lf_max - lf_min)
+        # Normalize to [0.5, 1.5] splotch multiplier
+        splotch = 0.5 + low_freq
+
         result = arr.copy()
         for c in range(3):
             channel = result[:, :, c].astype(np.float32)
-            channel[deep_mask] -= dist_norm[deep_mask] * darken_amount
+            channel[deep_mask] -= (
+                dist_norm[deep_mask] * darken_amount * splotch[deep_mask]
+            )
             result[:, :, c] = np.clip(channel, 0, 255).astype(np.uint8)
         return result
