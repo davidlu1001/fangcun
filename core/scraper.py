@@ -122,6 +122,15 @@ PREFERRED_INSCRIPTION_SOURCES: frozenset[str] = frozenset({
 API_BASE = "https://api.ygsf.com/v2.4"
 AES_KEY = b"PkT!ihpN^QkQ62k%"
 
+# R12 stroke-width deviation threshold for warning-level logs. 20% is the
+# empirical eye-noticeable imbalance threshold for two-char balanced seals
+# (the case R12 was designed to fix). For seals containing extreme-aspect
+# chars (一, 三), this threshold can be noisy because the extreme char's
+# rel_sw is its own stroke width and inflates the median target.
+# TODO: filter extreme-aspect chars from the anchor median upstream
+# at _try_unified_source_from_candidates anchor computation.
+R12_STROKE_DEVIATION_WARN = 0.20
+
 # Tab priority: 字典 first (clean, seal-optimized), 真迹 second (original, noisier).
 # 字库 (type=1) is deliberately excluded — digital font glyphs are unusable.
 TAB_PRIORITY: list[tuple[str, int]] = [
@@ -695,7 +704,7 @@ class CalligraphyScraper:
                 char_sw = self._relative_stroke_width(img)
                 dev = abs(char_sw - target_sw) / target_sw
                 deviations.append((char, char_sw, dev))
-                if dev > 0.20:
+                if dev > R12_STROKE_DEVIATION_WARN:
                     logger.warning(
                         "[R12] STROKE_DEVIATION '%s': rel_sw=%.3f target=%.3f deviation=%.0f%%",
                         char, char_sw, target_sw, dev * 100,
