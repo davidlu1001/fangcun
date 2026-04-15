@@ -134,6 +134,18 @@ Reset to 0 at the top of `fetch_chars_consistent` so an exception mid-call doesn
 
 Zhuwen uses max-alpha merge (`np.maximum` of char + frame layers). Baiwen uses mask paste (white cutout on red).
 
+## Texture: style-aware pipeline
+
+`StoneTexture.apply()` accepts `style` so baiwen (opaque bg + PAPER_COLOR cutouts) and zhuwen (transparent bg + red ink) don't share bugs.
+
+**ink_mask construction**: baiwen excludes pixels near `PAPER_COLOR` (RGB L2 distance < 30) so grain/drift/brightness modulation never leaks red noise onto white text cutouts. Zhuwen uses `alpha > 128` — any visible pixel is ink.
+
+**Pressure path**: baiwen uses `_pressure_variation_rgb` (brightness on ink only, keeps alpha=255 — real paper impressions never turn semi-transparent). Zhuwen keeps alpha-based `_pressure_variation` so relief strokes can fade.
+
+**Intersection darkening cap**: `distanceTransform` on a mostly-opaque baiwen mask yields `d_max ≈ 200`, so the old `dist/d_max > 0.3` check darkened the entire image center. `_stroke_intersection_darkening` now caps influence distance at `max(w, h) * 0.03` (≈18px @ 600px) — matches real ink-pooling radius.
+
+**Local RNG**: every layer receives an `rng: np.random.Generator` argument built once in `apply()` (`default_rng(seed)` or unseeded). No more `np.random.seed()` mutation of global state — concurrent callers with different seeds don't interfere. **This changes the texture byte-stream for any given seed** vs pre-1.3.0 output; regenerate regression baselines after upgrade.
+
 ## Data Flow
 
 ```
@@ -148,7 +160,7 @@ SealGenerator.generate()
   → extractor.extract(img, tab, source_name)
   → layout.arrange(style, shape)            # 6-phase pipeline
   → renderer.render()                     # text_scale per context
-  → texture.apply()                       # 6-layer stone effects
+  → texture.apply(style=style)            # style-aware 6-layer stone effects
   → rotate + preview
 ```
 

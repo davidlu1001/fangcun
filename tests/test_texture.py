@@ -75,7 +75,7 @@ class TestTextureEnhancements:
 
         total_corner_chips = 0
         total_edge_chips = 0
-        seeds = list(range(32))
+        seeds = list(range(64))
         for seed in seeds:
             result = tex.apply(img, grain_strength=1.0, seed=seed)
             alpha = np.array(result)[:, :, 3]

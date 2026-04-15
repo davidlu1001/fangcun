@@ -345,7 +345,7 @@ class SealGenerator:
                 )
 
         # ── 5. Texture ───────────────────────────────────────
-        seal = self._texture.apply(seal, grain, seed=seed)
+        seal = self._texture.apply(seal, grain, seed=seed, style=style)
 
         # ── 6. Rotation ──────────────────────────────────────
         if rotation != 0.0:

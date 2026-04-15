@@ -1,13 +1,19 @@
 """
 Stone-carved texture effects for seal images.
 
+Style-aware: baiwen (red background + white text cutouts) needs to treat
+white-cutout pixels as "paper" (skip grain/drift/pressure-on-alpha there),
+whereas zhuwen treats every visible pixel as ink.
+
 Layers applied sequentially when grain_strength > 0:
-  1. Pressure variation  — low-freq alpha modulation (stamp unevenness)
+  1. Pressure variation  — baiwen: RGB brightness on ink only;
+                           zhuwen: low-freq alpha modulation
   2. Frame edge roughness — shell-confined erosion + downsampled noise
   3. Stroke chipping     — edge-local erosion + salt noise (~0.3% density)
   4. Ink grain            — low-freq (σ=8) × 0.6 + high-freq (σ=1) × 0.4
-                           alpha = grain_strength × 0.3, colored pixels only
-  4.5 Color temp drift   — low-freq RGB shift on colored pixels
+                           on ink_mask only
+  4.5 Stroke-intersection darkening — capped distance transform on ink_mask
+  4.6 Color temp drift   — low-freq RGB shift on ink_mask only
   5. Final blur           — GaussianBlur radius 0.5
 """
 
@@ -16,6 +22,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from PIL import Image, ImageFilter
+
+from .renderer import PAPER_COLOR
 
 
 class StoneTexture:
@@ -26,19 +34,18 @@ class StoneTexture:
         img: Image.Image,
         grain_strength: float = 0.25,
         seed: int | None = None,
+        style: str = "baiwen",
     ) -> Image.Image:
         """
         Args:
             img:            RGBA seal image
             grain_strength: 0.0 = clean digital, 1.0 = maximum roughness
             seed:           optional RNG seed for reproducible texture output.
-                            When provided, seeds the global numpy RNG so all
-                            six noise layers (pressure, roughness, chipping,
-                            grain, drift, pooling) produce identical results
-                            across runs. NOTE: mutates global numpy random
-                            state — acceptable for single-threaded CLI/Gradio
-                            use; callers needing isolation should snapshot
-                            `np.random.get_state()` before invocation.
+                            Uses a *local* np.random.Generator — no global
+                            numpy state is touched, so concurrent callers
+                            with different seeds don't interfere.
+            style:          'baiwen' | 'zhuwen'. Controls ink_mask
+                            construction and pressure-variation path.
 
         Returns:
             New RGBA image with texture applied.
@@ -46,29 +53,47 @@ class StoneTexture:
         if grain_strength <= 0.0:
             return img.copy()
 
-        if seed is not None:
-            np.random.seed(seed)
+        rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
 
         arr = np.array(img, dtype=np.uint8).copy()
         alpha = arr[:, :, 3].copy()
 
-        # 1. Pressure variation (before roughness — it's a global modulation)
-        alpha = self._pressure_variation(alpha, grain_strength)
+        # Build ink_mask: True for real-ink pixels, False for paper cutouts
+        # and transparent areas. For baiwen, exclude pixels near PAPER_COLOR
+        # so white cutouts (text) don't get red noise / color drift / dark
+        # pressure tint.
+        if style == "baiwen":
+            paper = np.array(PAPER_COLOR, dtype=np.float32)
+            rgb_dist = np.sqrt(
+                np.sum((arr[:, :, :3].astype(np.float32) - paper) ** 2, axis=2)
+            )
+            ink_mask = (alpha > 128) & (rgb_dist > 30)
+        else:
+            ink_mask = alpha > 128
 
-        # 2. Frame edge roughness (shell-confined)
-        alpha = self._frame_roughness(alpha, grain_strength)
+        # 1. Pressure variation (style-aware)
+        if style == "baiwen":
+            # Baiwen: brightness modulation on ink only, keep alpha opaque
+            arr = self._pressure_variation_rgb(arr, ink_mask, grain_strength, rng)
+        else:
+            alpha = self._pressure_variation(alpha, grain_strength, rng)
 
-        # 3. Stroke chipping (salt noise on visible pixels)
-        alpha = self._stroke_chipping(alpha, grain_strength)
+        # 2. Frame edge roughness (alpha-based — OK for both styles)
+        alpha = self._frame_roughness(alpha, grain_strength, rng)
 
-        # 4. Ink grain on colored pixels
-        arr = self._ink_grain(arr, alpha, grain_strength)
+        # 3. Stroke chipping (alpha-based — OK for both styles)
+        alpha = self._stroke_chipping(alpha, grain_strength, rng)
 
-        # 4.5 Stroke intersection darkening (ink pooling)
-        arr = self._stroke_intersection_darkening(arr, alpha, grain_strength)
+        # 4. Ink grain on ink pixels
+        arr = self._ink_grain(arr, ink_mask, grain_strength, rng)
 
-        # 4.6 Color temperature drift
-        arr = self._color_temperature_drift(arr, alpha, grain_strength)
+        # 4.5 Stroke intersection darkening (capped distance)
+        arr = self._stroke_intersection_darkening(
+            arr, ink_mask, grain_strength, rng
+        )
+
+        # 4.6 Color temperature drift on ink pixels
+        arr = self._color_temperature_drift(arr, ink_mask, grain_strength, rng)
 
         arr[:, :, 3] = alpha
         result = Image.fromarray(arr, "RGBA")
@@ -81,7 +106,9 @@ class StoneTexture:
     # ── layer implementations ────────────────────────────────
 
     @staticmethod
-    def _frame_roughness(alpha: np.ndarray, strength: float) -> np.ndarray:
+    def _frame_roughness(
+        alpha: np.ndarray, strength: float, rng: np.random.Generator
+    ) -> np.ndarray:
         """
         Block-shaped stone chipping with dual-path: shell erosion for thick
         areas, random line breakage for thin lines.
@@ -112,7 +139,7 @@ class StoneTexture:
         if thin_ratio < 0.20:
             # Thin-line path: random gap breakage along lines
             sh, sw = max(1, h // 6), max(1, w // 6)
-            raw = np.random.randn(sh, sw).astype(np.float32)
+            raw = rng.standard_normal((sh, sw)).astype(np.float32)
             blurred = cv2.GaussianBlur(raw, (0, 0), sigmaX=3, sigmaY=3)
             blurred = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_CUBIC)
             mn, mx = blurred.min(), blurred.max()
@@ -127,7 +154,7 @@ class StoneTexture:
 
         # 1. Downsampled low-frequency noise (fast path)
         sh, sw = max(1, h // 8), max(1, w // 8)
-        raw = np.random.randn(sh, sw).astype(np.float32)
+        raw = rng.standard_normal((sh, sw)).astype(np.float32)
         blurred = cv2.GaussianBlur(raw, (0, 0), sigmaX=4, sigmaY=4)
         blurred = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_CUBIC)
         n_min, n_max = blurred.min(), blurred.max()
@@ -161,11 +188,11 @@ class StoneTexture:
             (corner_closeness - 0.85) / 0.15, 0, 1
         ).astype(np.float32)
 
-        # Cap total additive boost at 0.25 (subtle, not cartoonish).
-        # At a corner both terms fire: edge_boost~1 → 0.15, corner_boost~1
-        # → +0.18 more → capped at 0.25. Edges get only 0.15.
+        # Cap total additive boost at 0.30. Corner weight lifted from 0.18
+        # → 0.22 so the four corners actually read as the most worn area
+        # (real seals wear first at corners).
         total_boost = np.minimum(
-            edge_boost * 0.15 + corner_boost * 0.18, 0.25
+            edge_boost * 0.15 + corner_boost * 0.22, 0.30
         )
         combined_prob = blurred + total_boost
 
@@ -191,11 +218,13 @@ class StoneTexture:
         return result
 
     @staticmethod
-    def _stroke_chipping(alpha: np.ndarray, strength: float) -> np.ndarray:
+    def _stroke_chipping(
+        alpha: np.ndarray, strength: float, rng: np.random.Generator
+    ) -> np.ndarray:
         """Add salt noise (random transparent holes) to visible pixels."""
         density = 0.003 * strength
         visible = alpha > 128
-        salt = np.random.random(alpha.shape) < density
+        salt = rng.random(alpha.shape) < density
 
         result = alpha.copy()
         result[visible & salt] = 0
@@ -203,17 +232,19 @@ class StoneTexture:
 
     @staticmethod
     def _ink_grain(
-        arr: np.ndarray, alpha: np.ndarray, strength: float
+        arr: np.ndarray,
+        ink_mask: np.ndarray,
+        strength: float,
+        rng: np.random.Generator,
     ) -> np.ndarray:
-        """Layer low-freq and high-freq noise on colored pixels for ink texture."""
-        h, w = alpha.shape
-        colored = alpha > 128
+        """Layer low-freq and high-freq noise on ink pixels for ink texture."""
+        h, w = ink_mask.shape
 
-        if not np.any(colored):
+        if not np.any(ink_mask):
             return arr
 
         # Low-frequency noise (smooth undulations)
-        low_raw = np.random.randn(h, w).astype(np.float32)
+        low_raw = rng.standard_normal((h, w)).astype(np.float32)
         low_freq = cv2.GaussianBlur(low_raw, (0, 0), sigmaX=8, sigmaY=8)
         # Normalize to [-1, 1]
         lf_min, lf_max = low_freq.min(), low_freq.max()
@@ -221,7 +252,7 @@ class StoneTexture:
             low_freq = (low_freq - lf_min) / (lf_max - lf_min) * 2 - 1
 
         # High-frequency noise (fine grain)
-        high_freq = np.random.randn(h, w).astype(np.float32)
+        high_freq = rng.standard_normal((h, w)).astype(np.float32)
         hf_min, hf_max = high_freq.min(), high_freq.max()
         if hf_max - hf_min > 0:
             high_freq = (high_freq - hf_min) / (hf_max - hf_min) * 2 - 1
@@ -234,37 +265,41 @@ class StoneTexture:
         for c in range(3):
             channel = result[:, :, c].astype(np.float32)
             delta = grain * grain_amount * 255
-            channel[colored] += delta[colored]
+            channel[ink_mask] += delta[ink_mask]
             result[:, :, c] = np.clip(channel, 0, 255).astype(np.uint8)
 
         return result
 
     @staticmethod
     def _color_temperature_drift(
-        arr: np.ndarray, alpha: np.ndarray, strength: float
+        arr: np.ndarray,
+        ink_mask: np.ndarray,
+        strength: float,
+        rng: np.random.Generator,
     ) -> np.ndarray:
         """Add low-frequency R/G/B drift to simulate ink paste unevenness.
 
         Uses downsampled noise for speed. R channel drifts most (ink red
-        variation is most visible). Max +-8 color levels at strength=1.
+        variation is most visible). Max ±12 color levels at strength=1.
         """
         if strength <= 0:
             return arr
 
-        h, w = alpha.shape
-        colored = alpha > 128
-        if not np.any(colored):
+        h, w = ink_mask.shape
+        if not np.any(ink_mask):
             return arr
 
         result = arr.copy()
-        drift_amount = strength * 8.0
+        drift_amount = strength * 12.0
         # Downsampled low-freq noise per channel
         sh, sw = max(1, h // 8), max(1, w // 8)
         sigma = max(3.0, min(sw, sh) * 0.06)
 
-        weights = [1.0, 0.6, 0.4]  # R drifts most
+        # R drifts most; G/B more subdued so the red reads warm-then-cool
+        # rather than desaturating toward grey.
+        weights = [1.0, 0.45, 0.25]
         for c in range(3):
-            raw = np.random.randn(sh, sw).astype(np.float32)
+            raw = rng.standard_normal((sh, sw)).astype(np.float32)
             blurred = cv2.GaussianBlur(raw, (0, 0), sigmaX=sigma, sigmaY=sigma)
             drift = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_CUBIC)
             mn, mx = drift.min(), drift.max()
@@ -272,24 +307,29 @@ class StoneTexture:
                 drift = (drift - mn) / (mx - mn) * 2 - 1
 
             channel = result[:, :, c].astype(np.float32)
-            channel[colored] += drift[colored] * drift_amount * weights[c]
+            channel[ink_mask] += drift[ink_mask] * drift_amount * weights[c]
             result[:, :, c] = np.clip(channel, 0, 255).astype(np.uint8)
 
         return result
 
     @staticmethod
-    def _pressure_variation(alpha: np.ndarray, strength: float) -> np.ndarray:
+    def _pressure_variation(
+        alpha: np.ndarray, strength: float, rng: np.random.Generator
+    ) -> np.ndarray:
         """Low-frequency multiplicative alpha modulation for stamp pressure unevenness.
 
-        Produces 2-3 slightly faded areas where the stamp wasn't pressed evenly.
-        Multiplier range [0.82, 1.0] at strength=1. Uses downsampled noise.
+        Used only for zhuwen (alpha-based fading). Baiwen uses
+        ``_pressure_variation_rgb`` instead, because modulating alpha on a
+        fully opaque baiwen seal would make the red background semi-transparent.
+
+        Multiplier range [0.82, 1.0] at strength=1.
         """
         if strength <= 0:
             return alpha
 
         h, w = alpha.shape
         sh, sw = max(1, h // 8), max(1, w // 8)
-        raw = np.random.randn(sh, sw).astype(np.float32)
+        raw = rng.standard_normal((sh, sw)).astype(np.float32)
         sigma = max(3.0, min(sw, sh) * 0.08)
         field = cv2.GaussianBlur(raw, (0, 0), sigmaX=sigma, sigmaY=sigma)
         field = cv2.resize(field, (w, h), interpolation=cv2.INTER_CUBIC)
@@ -303,28 +343,75 @@ class StoneTexture:
         return result
 
     @staticmethod
+    def _pressure_variation_rgb(
+        arr: np.ndarray,
+        ink_mask: np.ndarray,
+        strength: float,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """Brightness-based pressure variation for baiwen (keeps alpha intact).
+
+        Same low-frequency field as the alpha-based version, but modulates RGB
+        brightness of ink pixels instead. Multiplier range [0.90, 1.0] at
+        strength=1 — subtler than the alpha version's [0.82, 1.0] because
+        color shifts are more perceptible than transparency changes, and
+        baiwen's red background never goes see-through on real paper.
+        """
+        if strength <= 0 or not np.any(ink_mask):
+            return arr
+
+        h, w = arr.shape[:2]
+        sh, sw = max(1, h // 8), max(1, w // 8)
+        raw = rng.standard_normal((sh, sw)).astype(np.float32)
+        sigma = max(3.0, min(sw, sh) * 0.08)
+        field = cv2.GaussianBlur(raw, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        field = cv2.resize(field, (w, h), interpolation=cv2.INTER_CUBIC)
+        mn, mx = field.min(), field.max()
+        if mx > mn:
+            field = (field - mn) / (mx - mn)
+
+        multiplier = 1.0 - field * strength * 0.10
+
+        result = arr.copy()
+        for c in range(3):
+            channel = result[:, :, c].astype(np.float32)
+            channel[ink_mask] *= multiplier[ink_mask]
+            result[:, :, c] = np.clip(channel, 0, 255).astype(np.uint8)
+        return result
+
+    @staticmethod
     def _stroke_intersection_darkening(
-        arr: np.ndarray, alpha: np.ndarray, strength: float
+        arr: np.ndarray,
+        ink_mask: np.ndarray,
+        strength: float,
+        rng: np.random.Generator,
     ) -> np.ndarray:
         """Darken stroke interiors/crossings to simulate ink pooling.
 
-        Uses distance transform: pixels far from alpha boundary are deep
-        inside strokes (or at intersections). Darkens these by up to 30
-        color levels at strength=1.
+        Uses distance transform on ``ink_mask``: pixels far from the ink
+        boundary are deep inside strokes (or at intersections). The maximum
+        influence distance is capped to ``max(w, h) * 0.03`` (≈18px @ 600px)
+        — real ink pooling only occurs within ~15px of stroke edges. Without
+        the cap, a near-fully-opaque baiwen mask yields d_max of 200+ and
+        the "deep interior" mask blackens the entire image center.
         """
         if strength <= 0:
             return arr
 
-        visible = (alpha > 128).astype(np.uint8)
-        if not np.any(visible):
+        if not np.any(ink_mask):
             return arr
 
-        dist = cv2.distanceTransform(visible, cv2.DIST_L2, 5)
+        dist = cv2.distanceTransform(ink_mask.astype(np.uint8), cv2.DIST_L2, 5)
         d_max = dist.max()
         if d_max <= 0:
             return arr
 
-        dist_norm = dist / d_max
+        h, w = ink_mask.shape
+        cap = min(float(d_max), max(w, h) * 0.03)
+        if cap <= 0:
+            return arr
+
+        dist_norm = np.clip(dist / cap, 0, 1)
         deep_mask = dist_norm > 0.3
         if not np.any(deep_mask):
             return arr
@@ -333,8 +420,7 @@ class StoneTexture:
 
         # Low-frequency multiplicative noise: real ink pools unevenly,
         # with splotches of deeper ink rather than uniform interior darkening.
-        h, w = alpha.shape
-        raw = np.random.randn(h, w).astype(np.float32)
+        raw = rng.standard_normal((h, w)).astype(np.float32)
         low_freq = cv2.GaussianBlur(raw, (0, 0), sigmaX=15, sigmaY=15)
         lf_min, lf_max = low_freq.min(), low_freq.max()
         if lf_max > lf_min:

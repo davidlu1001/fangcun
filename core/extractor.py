@@ -4,10 +4,12 @@ Character glyph extraction: raw calligraphy image → clean binary mask.
 Pipeline:
   1. _normalize_to_black_on_white()  — three-tier polarity defense
   2. Otsu / adaptive binarization (source-aware)
-  2.5 _remove_seal_frame()          — for 印谱 sources only
   3. Morphological denoising
   4. Bounding box crop
   5. Quality validation (absolute pixel count for simple chars like 一)
+
+For 印谱 sources, frame removal happens inside `_extract_yinpu_strokes`
+during the two-phase alpha extraction — no separate projection pass.
 
 Output: mode "L" image, 255 = stroke pixel, 0 = background
 """
@@ -342,94 +344,6 @@ class CharExtractor:
             ).astype(np.uint8)
 
         return gray
-
-    # ── Seal frame removal ───────────────────────────────────
-
-    def _remove_seal_frame(self, binary: np.ndarray) -> np.ndarray:
-        """
-        Remove seal frame lines via 1D projection, anchored to content bbox.
-
-        Key fix: old version used full-image dimensions (W×0.50) as threshold.
-        When the image has large transparent padding (bbox_w << W), the frame's
-        actual row_sum is far below W×0.50, so frames were never detected.
-
-        New version finds the content bounding box first, then uses bbox
-        dimensions for threshold (70%) and scan region (15%). Padding-immune.
-
-        Threshold 70% (not 50%): frame lines span ~100% of bbox width,
-        while calligraphy strokes rarely exceed 70%. Safe margin.
-
-        Execution order: convolve FIRST, then hard-truncate center zone.
-        Reverse order lets dilation leak past the protection boundary.
-        """
-        h, w = binary.shape
-
-        # ── Step 0: find content bbox ────────────────────────
-        content = binary > 0
-        if not content.any():
-            return binary.copy()
-
-        rows_any = np.where(content.any(axis=1))[0]
-        cols_any = np.where(content.any(axis=0))[0]
-        by0, by1 = int(rows_any[0]), int(rows_any[-1])
-        bx0, bx1 = int(cols_any[0]), int(cols_any[-1])
-        bbox_h = by1 - by0 + 1
-        bbox_w = bx1 - bx0 + 1
-
-        # ── Step 1: bbox-based thresholds ────────────────────
-        threshold_w = bbox_w * 0.70
-        threshold_h = bbox_h * 0.70
-        scan_rows = max(3, int(bbox_h * 0.15))
-        scan_cols = max(3, int(bbox_w * 0.15))
-        erase_r = max(2, int(min(bbox_w, bbox_h) * 0.015))
-        kernel = np.ones(2 * erase_r + 1, dtype=int)
-
-        result = binary.copy()
-
-        # ── Step 2: Y-axis projection (top/bottom frames) ───
-        row_sums = content.sum(axis=1).astype(float)
-
-        frame_rows = np.zeros(h, dtype=bool)
-        top_end = by0 + scan_rows
-        bot_start = by1 - scan_rows + 1
-
-        frame_rows[by0:top_end] = row_sums[by0:top_end] > threshold_w
-        frame_rows[bot_start : by1 + 1] = row_sums[bot_start : by1 + 1] > threshold_w
-
-        if frame_rows.any():
-            dilated = np.convolve(frame_rows.astype(int), kernel, mode="same") > 0
-            # Hard-truncate: outside bbox and center zone
-            dilated[:by0] = False
-            dilated[top_end:bot_start] = False
-            dilated[by1 + 1 :] = False
-            result[dilated, :] = 0
-            logger.info(
-                "移除上下印框: %d rows (bbox_h=%d, scan=%d, thr=%.0f, erase_r=%d)",
-                int(dilated.sum()), bbox_h, scan_rows, threshold_w, erase_r,
-            )
-
-        # ── Step 3: X-axis projection (left/right frames) ───
-        col_sums = content.sum(axis=0).astype(float)
-
-        frame_cols = np.zeros(w, dtype=bool)
-        left_end = bx0 + scan_cols
-        right_start = bx1 - scan_cols + 1
-
-        frame_cols[bx0:left_end] = col_sums[bx0:left_end] > threshold_h
-        frame_cols[right_start : bx1 + 1] = col_sums[right_start : bx1 + 1] > threshold_h
-
-        if frame_cols.any():
-            dilated = np.convolve(frame_cols.astype(int), kernel, mode="same") > 0
-            dilated[:bx0] = False
-            dilated[left_end:right_start] = False
-            dilated[bx1 + 1 :] = False
-            result[:, dilated] = 0
-            logger.info(
-                "移除左右印框: %d cols (bbox_w=%d, scan=%d, thr=%.0f, erase_r=%d)",
-                int(dilated.sum()), bbox_w, scan_cols, threshold_h, erase_r,
-            )
-
-        return result
 
     # ── Compositing helpers ──────────────────────────────────
 

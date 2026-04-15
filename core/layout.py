@@ -247,15 +247,23 @@ class SealLayout:
         if src_w == 0 or src_h == 0:
             return mask
 
-        scale = min(max_w / src_w, max_h / src_h)
+        # Single-column (cell_ratio > 2.0, e.g. 3-char seal's left column):
+        # allow 10% horizontal overflow so the char fills the column visually.
+        # The extra width bleeds gently into the margin rather than leaving
+        # a thin lonely glyph in a tall cell.
+        cell_ratio = max_h / max(max_w, 1)
+        if cell_ratio > 2.0:
+            scale = min((max_w * 1.10) / src_w, max_h / src_h)
+        else:
+            scale = min(max_w / src_w, max_h / src_h)
         new_w = max(1, int(src_w * scale))
         new_h = max(1, int(src_h * scale))
 
-        # Tall cells: up to 1.25x vertical stretch
-        cell_ratio = max_h / max(max_w, 1)
+        # Tall cells: up to 1.35x vertical stretch (was 1.25 — single-column
+        # chars like 園 benefit from extra vertical fill).
         if cell_ratio > 1.5 and new_h / max_h < 0.85:
             target_h = int(max_h * 0.90)
-            stretch = min(1.25, target_h / max(new_h, 1))
+            stretch = min(1.35, target_h / max(new_h, 1))
             new_h = int(new_h * stretch)
         elif cell_ratio < 0.67 and new_w / max_w < 0.85:
             target_w = int(max_w * 0.90)
