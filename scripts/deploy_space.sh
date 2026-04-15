@@ -40,12 +40,11 @@ git checkout space-deploy
 # are on space-deploy but not on main, strip excluded paths, and commit.
 git checkout main -- .
 # Drop index entries for anything present on space-deploy but not on main
-# (e.g. CLAUDE.md indexes from a previous leaky deploy). Uses
-# `git diff --diff-filter=D main -- :/` to find what `git checkout`
-# couldn't reach.
-git ls-files | while IFS= read -r f; do
+# (e.g. CLAUDE.md indexes from a previous leaky deploy). Use -z so
+# unicode filenames (`宇宙洪荒_baiwen_square.png` etc.) survive the loop.
+while IFS= read -r -d '' f; do
     git cat-file -e "main:$f" 2>/dev/null || git rm -f --cached -- "$f" >/dev/null
-done
+done < <(git ls-files -z)
 git rm -rf --cached docs/samples/ >/dev/null 2>&1 || true
 rm -rf docs/samples/
 
