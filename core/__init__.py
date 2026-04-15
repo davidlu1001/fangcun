@@ -348,7 +348,11 @@ class SealGenerator:
         seal = self._texture.apply(seal, grain, seed=seed, style=style)
 
         # ── 6. Rotation ──────────────────────────────────────
-        if rotation != 0.0:
+        # Square seals are never rotated: tilted corners look unbalanced and
+        # the rotation bbox expansion leaves diagonal paper-white wedges
+        # around the edge. Oval seals can take a small tilt — the ellipse
+        # mask already hides the corner expansion.
+        if shape != "square" and rotation != 0.0:
             seal = seal.rotate(
                 rotation,
                 resample=Image.Resampling.BICUBIC,

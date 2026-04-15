@@ -24,17 +24,17 @@ Fangcun — Chinese Seal Generator for Geek-Zen
 |:---:|:---:|:---:|:---:|
 | <img src="docs/samples/c01_zen_bw_oval.png" width="160"> | <img src="docs/samples/c11_sushi_bw_oval.png" width="160"> | <img src="docs/samples/c16_geekzen_bw_oval.png" width="160"> | <img src="docs/samples/c20_tianren_bw_sq.png" width="160"> |
 
-| 卢修齐（名章·白文·方章） | 大观园（3字·朱文·竖椭圆） | 宇宙洪荒（4字·白文·方章） | 朝朝（重字·朱文·竖椭圆） |
+| 大观园（3字·白文·方章） | 大观园（3字·朱文·竖椭圆） | 宇宙洪荒（4字·白文·方章） | 朝朝（重字·朱文·竖椭圆） |
 |:---:|:---:|:---:|:---:|
-| <img src="docs/samples/c18_luxiuqi_bw_sq.png" width="160"> | <img src="docs/samples/c23_daguan_zw_oval.png" width="160"> | <img src="docs/samples/宇宙洪荒_baiwen_square.png" width="160"> | <img src="docs/samples/朝朝_zhuwen_oval.png" width="160"> |
+| <img src="docs/samples/大观园_baiwen_square.png" width="160"> | <img src="docs/samples/c23_daguan_zw_oval.png" width="160"> | <img src="docs/samples/宇宙洪荒_baiwen_square.png" width="160"> | <img src="docs/samples/朝朝_zhuwen_oval.png" width="160"> |
 
-_均为自动生成，字形来自 ygsf.com 书法字库（统一字源，主要取自《中国篆刻大字典》《汉印文字征》等正统汉印印谱）。_
+_均为自动生成，字形取自正统汉印字典（《中国篆刻大字典》《汉印文字征》等），统一字源同碑帖保证通篇书体一致。_
 
 ## 功能
 
 - **朱白文渲染**：白文（红底白字实心填充）、朱文（透明底红字+红框，冲刀破边）
 - **形制选择**：方章、竖椭圆（腰圆章，内圈双线框）
-- **书法字源**：自动从 ygsf.com 抓取篆书/隶书/楷书（优先字典 tab，次选真迹 tab，不用字库）
+- **书法字源**：自动抓取篆书/隶书/楷书（优先字典 tab，次选真迹 tab，不用字库）
 - **同源同体**：同一方印章内所有字自动统一书体，并尽量选同一碑帖来源（5级来源统一策略）
 - **繁体优先**：篆书形成于先秦，正体字是原生形态。严肃字典（中国篆刻大字典、汉印文字征）以正体字索引，fangcun 自动先查繁体再查简体
 - **印章类型**：名章（强制篆书，不降级）、闲章（允许隶楷）、品牌章（任何字体）
@@ -70,7 +70,7 @@ python app.py
 python cli.py --text "禅" --shape oval --style baiwen --type leisure
 
 # 名章（强制篆书，不降级到隶楷）
-python cli.py --text "卢修齐" --shape square --style baiwen --type name
+python cli.py --text "齐白石" --shape square --style baiwen --type name
 
 # 批量（每行一个词，用于视频封面流水线）
 python cli.py --batch chars.txt --shape oval --style baiwen --type leisure --output-dir ./seals/
@@ -84,7 +84,7 @@ python cli.py --clear-cache    # 清除全部缓存
 python cli.py --no-api-cache --text "禅"   # 跳过缓存
 
 # 调试
-python cli.py --debug --text "卢修齐" --type name  # 详细日志（候选列表、打分细节）
+python cli.py --debug --text "齐白石" --type name  # 详细日志（候选列表、打分细节）
 python cli.py --text "禅" --debug-extract   # 保存提取中间步骤（normalized/binary/denoised/cropped）；多字按 {idx}_{char}/ 嵌套
 python cli.py --text "天人合一" --debug-layout  # 保存版面调试图（cell/ink bbox/centroid 叠加）
 
@@ -92,7 +92,7 @@ python cli.py --text "天人合一" --debug-layout  # 保存版面调试图（ce
 python cli.py --text "禅" --seed 42 --output-dir ./out
 
 # 严格一致性（仅接受 Level 1-2 统一来源，否则报错）
-python cli.py --text "卢修齐" --type name --strict-consistency
+python cli.py --text "齐白石" --type name --strict-consistency
 ```
 
 ### chars.txt 格式
@@ -109,7 +109,7 @@ python cli.py --text "卢修齐" --type name --strict-consistency
 ```
 core/
 ├── __init__.py      # SealGenerator 统一入口
-├── scraper.py       # ygsf.com 书法字抓取 + 5级来源统一 + 评分选图 + 3级缓存
+├── scraper.py       # 书法字抓取 + 5级来源统一 + 评分选图 + 3级缓存
 ├── extractor.py     # 三层极性归一化 + 二值化 + 两阶段印谱提取
 ├── layout.py        # 6阶段排版：适配 → 平衡 → 检测 → 反向构造 → 笔宽归一 → 重心放置
 ├── renderer.py      # 白文蒙版贴图 / 朱文 max-alpha 融合渲染 / 椭圆适配

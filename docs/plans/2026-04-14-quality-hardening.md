@@ -183,7 +183,7 @@ The corpus covers character count (1–4+), difficulty (common/complex/rare), in
   seal_type: leisure
   notes: "R12 stroke-width sibling match test case"
 
-- id: c15_luxi_bw_oval
+- id: c15_qibai_bw_oval
   text: "卢修"
   shape: oval
   style: baiwen
@@ -205,15 +205,15 @@ The corpus covers character count (1–4+), difficulty (common/complex/rare), in
   seal_type: brand
   notes: "brand 3-char square zhuwen"
 
-- id: c18_luxiuqi_bw_sq
-  text: "卢修齐"
+- id: c18_qibaishi_bw_sq
+  text: "齐白石"
   shape: square
   style: baiwen
   seal_type: name
   notes: "3-char name seal — the decorative source bug origin"
 
-- id: c19_luxiuqi_zw_oval
-  text: "卢修齐"
+- id: c19_qibaishi_zw_oval
+  text: "齐白石"
   shape: oval
   style: zhuwen
   seal_type: name
@@ -314,7 +314,7 @@ The corpus covers character count (1–4+), difficulty (common/complex/rare), in
   notes: ">4 chars — auto-shrink + warning"
 
 - id: c33_trad_input
-  text: "盧修齊"
+  text: "齊白石"
   shape: square
   style: baiwen
   seal_type: name

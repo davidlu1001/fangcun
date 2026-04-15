@@ -24,10 +24,10 @@ two independent process invocations.
 | c03_dao_zw_sq | 道 | IDENTICAL |
 | c11_sushi_bw_oval | 苏轼 | IDENTICAL |
 | c14_zhizhi_bw_sq | 知足 | IDENTICAL |
-| c18_luxiuqi_bw_sq | 卢修齐 | IDENTICAL |
+| c18_qibaishi_bw_sq | 齐白石 | IDENTICAL |
 | c20_tianren_bw_sq | 天人合一 | IDENTICAL |
 | c32_5char_overflow | 天地玄黄宇 | IDENTICAL |
-| c33_trad_input | 盧修齊 | IDENTICAL |
+| c33_trad_input | 齊白石 | IDENTICAL |
 
 ## Why this works
 

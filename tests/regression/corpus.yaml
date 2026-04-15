@@ -102,12 +102,12 @@
   seal_type: leisure
   notes: "R12 stroke-width sibling match test case"
 
-- id: c15_luxi_bw_oval
-  text: "卢修"
+- id: c15_qibai_bw_oval
+  text: "齐白"
   shape: oval
   style: baiwen
   seal_type: name
-  notes: "rare char 卢→盧 in name mode"
+  notes: "2-char name oval baiwen (齐→齊 traditional fallback)"
 
 # ── 3-char tests ────────────────────────────────────────────
 - id: c16_geekzen_bw_oval
@@ -124,15 +124,15 @@
   seal_type: brand
   notes: "brand 3-char square zhuwen"
 
-- id: c18_luxiuqi_bw_sq
-  text: "卢修齐"
+- id: c18_qibaishi_bw_sq
+  text: "齐白石"
   shape: square
   style: baiwen
   seal_type: name
-  notes: "3-char name seal — the decorative source bug origin"
+  notes: "3-char name seal (historical figure — public domain reference)"
 
-- id: c19_luxiuqi_zw_oval
-  text: "卢修齐"
+- id: c19_qibaishi_zw_oval
+  text: "齐白石"
   shape: oval
   style: zhuwen
   seal_type: name
@@ -233,11 +233,11 @@
   notes: ">4 chars — auto-shrink + warning"
 
 - id: c33_trad_input
-  text: "盧修齊"
+  text: "齊白石"
   shape: square
   style: baiwen
   seal_type: name
-  notes: "already-traditional input — should NOT double-convert"
+  notes: "already-traditional input (齊 is traditional of 齐) — should NOT double-convert"
 
 - id: c34_zhi_bw_sq
   text: "止"

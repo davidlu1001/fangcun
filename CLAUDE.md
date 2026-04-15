@@ -173,11 +173,11 @@ python cli.py --batch chars.txt --output-dir ./seals/
 python cli.py --cache-info              # show cache stats
 python cli.py --clear-cache             # purge all cached data
 python cli.py --no-api-cache            # bypass cache for this run
-python cli.py --debug --text "卢修齐" --type name  # verbose diagnostics
+python cli.py --debug --text "齐白石" --type name  # verbose diagnostics
 python cli.py --text "禅" --debug-extract           # save extractor intermediates
 python cli.py --text "天人合一" --debug-layout       # save layout overlay (cells/ink/centroid)
 python cli.py --text "禅" --seed 42                  # reproducible texture
-python cli.py --text "卢修齐" --type name --strict-consistency  # require Level 1-2 source
+python cli.py --text "齐白石" --type name --strict-consistency  # require Level 1-2 source
 python cli.py --batch chars.txt --jobs 3                         # 3 concurrent workers (thread-local SealGenerator per worker)
 ```
 
