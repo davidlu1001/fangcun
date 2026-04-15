@@ -76,6 +76,8 @@ class SealGenerator:
         size: int = 600,
         seed: int | None = None,
         return_debug: bool = False,
+        user_glyphs: list[Image.Image] | None = None,
+        user_glyph_polarity: str = "auto",
     ) -> dict:
         """
         Generate a complete seal image.
@@ -94,6 +96,15 @@ class SealGenerator:
                           showing cell boundaries, ink bboxes, centroids) in
                           the result. Cheap — reuses the same placements,
                           no pipeline re-run.
+            user_glyphs:  optional list of PIL images, one per character, to
+                          use instead of scraping. Bypasses `_scraper` entirely
+                          — no network call. `len(user_glyphs) == len(text)`
+                          required.
+            user_glyph_polarity: "auto" | "black_on_white" | "white_on_black".
+                          Only used with `user_glyphs`. When "white_on_black"
+                          (ink rubbings), the image is RGB-inverted before
+                          extraction. "auto" leaves the existing extractor
+                          three-tier polarity detection to decide.
 
         Returns:
             dict with keys: image_transparent, image_preview,
@@ -101,7 +112,11 @@ class SealGenerator:
                            consistency_level, source_names
                            (+ image_layout_debug if return_debug=True)
         """
-        prep = self._prepare_placements(text, shape, style, seal_type, size)
+        prep = self._prepare_placements(
+            text, shape, style, seal_type, size,
+            user_glyphs=user_glyphs,
+            user_glyph_polarity=user_glyph_polarity,
+        )
         rendered = self._render_and_texture(
             placements=prep["placements"],
             shape=shape,
@@ -139,6 +154,8 @@ class SealGenerator:
         rotation: float = 2.0,
         size: int = 600,
         seeds: list[int] | None = None,
+        user_glyphs: list[Image.Image] | None = None,
+        user_glyph_polarity: str = "auto",
     ) -> list[dict]:
         """Generate N variations of a seal differing only in texture seed.
 
@@ -168,7 +185,11 @@ class SealGenerator:
                 f"seeds length ({len(seeds)}) must match n ({n})"
             )
 
-        prep = self._prepare_placements(text, shape, style, seal_type, size)
+        prep = self._prepare_placements(
+            text, shape, style, seal_type, size,
+            user_glyphs=user_glyphs,
+            user_glyph_polarity=user_glyph_polarity,
+        )
 
         variants: list[dict] = []
         for seed in seeds:
@@ -236,8 +257,14 @@ class SealGenerator:
         style: str,
         seal_type: str,
         size: int,
+        user_glyphs: list[Image.Image] | None = None,
+        user_glyph_polarity: str = "auto",
     ) -> dict:
         """Run the expensive prefix: scrape → extract → layout.
+
+        If `user_glyphs` is provided, the scraper is bypassed entirely and
+        the provided images are fed straight into the extractor. Useful for
+        calligraphers / researchers with their own glyph references.
 
         Returns a dict with absolute-canvas placements plus provenance
         metadata. Callers then feed this into `_render_and_texture` one
@@ -251,20 +278,45 @@ class SealGenerator:
         if len(text) > 4:
             warnings.append(f"超过4字 ({len(text)}字), 将自动缩小适配")
 
-        # ── 1. Fetch character images (consistency-first) ────
+        # ── 1. Source: scraper OR user-provided ──────────────
         #
-        # 金石学原则：同一方印所有字必须同一书体。
-        # fetch_chars_consistent tries each priority style for ALL
-        # characters before falling back, so "禅宗" won't mix 篆+隶.
+        # 金石学原则：同一方印所有字必须同一书体。scraper-based
+        # fetch_chars_consistent enforces this; user-provided mode trusts
+        # the caller to pick style-consistent glyphs.
         #
-        # Tab priority per font style: 字典 → 真迹 (不用字库).
-        # Tab source affects extractor preprocessing intensity.
-        #
-        raw_images, font_used, any_fallback, tab_sources, source_names, fetch_warnings = (
-            self._scraper.fetch_chars_consistent(text, seal_type)
-        )
-        warnings.extend(fetch_warnings)
-        consistency_level = getattr(self._scraper, "_last_consistency_level", 0)
+        if user_glyphs is not None:
+            if len(user_glyphs) != len(text):
+                raise ValueError(
+                    f"字数 ({len(text)}) 与上传图片数量 ({len(user_glyphs)}) 不一致"
+                )
+
+            raw_images = list(user_glyphs)
+            font_used = "用户提供"
+            any_fallback = False
+            # Pick tab "字典" so the extractor routes to the Otsu path
+            # (cleaner threshold for user uploads whose provenance we
+            # don't know). Empty source_name avoids matching the
+            # KNOWN_YINPU_SOURCES whitelist — polarity is settled by the
+            # extractor's Tier 2/3 detection unless the caller forces it
+            # via `user_glyph_polarity` below.
+            tab_sources = ["字典"] * len(text)
+            source_names = [""] * len(text)
+            consistency_level = 0  # N/A for user-provided mode
+            warnings.append("使用用户上传图片作为字源（已跳过自动选源）")
+
+            if user_glyph_polarity != "auto":
+                raw_images = [
+                    self._coerce_polarity(img, user_glyph_polarity)
+                    for img in raw_images
+                ]
+        else:
+            # Original scraper path — 字典 → 真迹 tab priority, 5-level
+            # source unification, etc.
+            raw_images, font_used, any_fallback, tab_sources, source_names, fetch_warnings = (
+                self._scraper.fetch_chars_consistent(text, seal_type)
+            )
+            warnings.extend(fetch_warnings)
+            consistency_level = getattr(self._scraper, "_last_consistency_level", 0)
 
         # ── 2. Extract character masks (source-aware) ────────
         # source_name passed for Tier 1 印谱 whitelist detection.
@@ -409,6 +461,33 @@ class SealGenerator:
         prep = self._prepare_placements(text, shape, style, seal_type, size)
         canvas_w, canvas_h = SealRenderer.canvas_dimensions(shape, size)
         return self._layout.debug_render(prep["placements"], (canvas_w, canvas_h))
+
+    # ── User-glyph helpers ──────────────────────────────────
+
+    @staticmethod
+    def _coerce_polarity(img: Image.Image, polarity: str) -> Image.Image:
+        """Force polarity on a user-uploaded image before extraction.
+
+        Args:
+            polarity: "black_on_white" (pass-through) or "white_on_black"
+                      (RGB-invert, useful for ink-rubbing / 印谱 拓片).
+
+        Returns:
+            RGBA image in black-on-white convention (what the extractor
+            expects). Alpha channel preserved so synthetic transparent
+            backgrounds on user uploads still let Tier 2 alpha detection
+            find the opaque region containing strokes.
+        """
+        if polarity == "black_on_white":
+            return img.convert("RGBA")
+
+        if polarity == "white_on_black":
+            rgba = img.convert("RGBA")
+            arr = np.array(rgba)
+            arr[:, :, :3] = 255 - arr[:, :, :3]
+            return Image.fromarray(arr, "RGBA")
+
+        return img
 
 
 def _hex_to_rgb(hex_str: str) -> tuple[int, int, int]:

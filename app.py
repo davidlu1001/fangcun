@@ -27,6 +27,39 @@ _gen = SealGenerator()
 _SHAPE_MAP = {"竖椭圆": "oval", "方章": "square"}
 _STYLE_MAP = {"白文": "baiwen", "朱文": "zhuwen"}
 _TYPE_MAP = {"名章（强制篆书）": "name", "闲章（允许隶楷）": "leisure", "品牌章（任何字体）": "brand"}
+_POLARITY_MAP = {
+    "自动检测": "auto",
+    "黑字白底": "black_on_white",
+    "白字黑底（印谱拓片）": "white_on_black",
+}
+
+
+def _collect_user_glyphs(
+    char_inputs: list[str | None],
+    img_inputs: list[Image.Image | None],
+) -> tuple[str, list[Image.Image]]:
+    """Pair non-empty (char, image) entries in UI order.
+
+    Raises gr.Error on missing pairs or invalid chars. Returns the derived
+    text (concatenated chars) and the matching glyph list.
+    """
+    pairs: list[tuple[str, Image.Image]] = []
+    for c, img in zip(char_inputs, img_inputs):
+        if not c and img is None:
+            continue  # both empty — skip row
+        if not c or not c.strip():
+            raise gr.Error("已上传图片但未填写对应汉字")
+        if img is None:
+            raise gr.Error(f"汉字 '{c}' 缺少对应的上传图片")
+        char = c.strip()
+        if len(char) != 1:
+            raise gr.Error(f"每个输入框只能填一个汉字，'{char}' 不符合")
+        pairs.append((char, img))
+
+    if not pairs:
+        raise gr.Error("请至少为一个字上传图片")
+
+    return "".join(c for c, _ in pairs), [img for _, img in pairs]
 
 
 _CONSISTENCY_LABELS = {
@@ -47,9 +80,14 @@ def generate_seal(
     grain_strength: float,
     rotation: float,
     seed_value: float | None,
+    user_glyphs: list[Image.Image] | None = None,
+    user_glyph_polarity: str = "auto",
 ) -> tuple[Image.Image | None, Image.Image | None, str, str | None, str | None]:
     """
     Main generation callback for Gradio.
+
+    When `user_glyphs` is provided, the scraper is bypassed. `text` must
+    still be passed — its length must equal len(user_glyphs).
 
     Returns:
         (transparent_img, preview_img, status_markdown,
@@ -78,6 +116,8 @@ def generate_seal(
             grain=grain_strength,
             rotation=rotation,
             seed=seed,
+            user_glyphs=user_glyphs,
+            user_glyph_polarity=user_glyph_polarity,
         )
     except Exception as exc:
         logging.exception("Generation failed")
@@ -185,11 +225,62 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
     with gr.Row():
         # ── Left panel: parameters ───────────────────────────
         with gr.Column(scale=1):
-            text_input = gr.Textbox(
-                label="📝 印章文字",
-                placeholder="输入印章文字（1–4字）",
-                value="禅",
-                max_lines=1,
+            mode_input = gr.Radio(
+                choices=["自动选源", "我自己上传字源"],
+                value="自动选源",
+                label="🔀 字源模式",
+                info="自动选源：从字典抓取并做同源同体匹配。上传字源：跳过抓取，用你自己的图片。",
+            )
+
+            # ── Auto mode ────────────────────────────────────
+            with gr.Group(visible=True) as auto_group:
+                text_input = gr.Textbox(
+                    label="📝 印章文字",
+                    placeholder="输入印章文字（1–4字）",
+                    value="禅",
+                    max_lines=1,
+                )
+
+            # ── User-upload mode ─────────────────────────────
+            with gr.Group(visible=False) as upload_group:
+                gr.Markdown(
+                    "**上传字源**：每个字独立上传一张单字、已裁剪、对比度清晰的图片。"
+                    "字序按上至下排列（印章阅读顺序）。空行会自动忽略。"
+                )
+                polarity_input = gr.Radio(
+                    choices=list(_POLARITY_MAP.keys()),
+                    value="自动检测",
+                    label="🔅 图片极性",
+                    info="印谱拓片（白字黑底）请选 '白字黑底'；其余默认即可。",
+                )
+                upload_char_inputs: list[gr.Textbox] = []
+                upload_img_inputs: list[gr.Image] = []
+                for i in range(4):
+                    with gr.Row():
+                        char_tb = gr.Textbox(
+                            label=f"字 {i + 1}",
+                            placeholder="单字",
+                            max_lines=1,
+                            scale=1,
+                        )
+                        img_up = gr.Image(
+                            label=f"图片 {i + 1}",
+                            type="pil",
+                            sources=["upload"],
+                            height=120,
+                            scale=3,
+                        )
+                    upload_char_inputs.append(char_tb)
+                    upload_img_inputs.append(img_up)
+
+            def _on_mode_change(mode: str):
+                auto_vis = mode == "自动选源"
+                return gr.update(visible=auto_vis), gr.update(visible=not auto_vis)
+
+            mode_input.change(
+                fn=_on_mode_change,
+                inputs=[mode_input],
+                outputs=[auto_group, upload_group],
             )
 
             shape_input = gr.Radio(
@@ -280,16 +371,43 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
     transparent_path_state = gr.State(value=None)
     preview_path_state = gr.State(value=None)
 
-    def on_generate(text, shape, style, seal_type, color, grain, rotation, seed):
-        img_t, img_p, status, path_t, path_p = generate_seal(
-            text, shape, style, seal_type, color, grain, rotation, seed
+    def _resolve_source(
+        mode: str,
+        auto_text: str,
+        polarity_label: str,
+        c0, c1, c2, c3,
+        i0, i1, i2, i3,
+    ) -> tuple[str, list[Image.Image] | None, str]:
+        """Collapse the two-mode UI into (text, user_glyphs, polarity)."""
+        if mode == "自动选源":
+            return auto_text, None, "auto"
+        text, glyphs = _collect_user_glyphs([c0, c1, c2, c3], [i0, i1, i2, i3])
+        return text, glyphs, _POLARITY_MAP.get(polarity_label, "auto")
+
+    def on_generate(
+        mode, auto_text, polarity_label,
+        c0, c1, c2, c3, i0, i1, i2, i3,
+        shape, style, seal_type, color, grain, rotation, seed,
+    ):
+        text, glyphs, polarity = _resolve_source(
+            mode, auto_text, polarity_label,
+            c0, c1, c2, c3, i0, i1, i2, i3,
         )
-        return img_t, img_p, status, path_t, path_p
+        return generate_seal(
+            text, shape, style, seal_type, color, grain, rotation, seed,
+            user_glyphs=glyphs, user_glyph_polarity=polarity,
+        )
 
     generate_btn.click(
         fn=on_generate,
         inputs=[
+            mode_input,
             text_input,
+            polarity_input,
+            upload_char_inputs[0], upload_char_inputs[1],
+            upload_char_inputs[2], upload_char_inputs[3],
+            upload_img_inputs[0], upload_img_inputs[1],
+            upload_img_inputs[2], upload_img_inputs[3],
             shape_input,
             style_input,
             seal_type_input,
@@ -307,13 +425,72 @@ with gr.Blocks(title="方寸 · 极客禅印章生成器", theme=gr.themes.Soft(
         ],
     )
 
-    def on_generate_variants(text, shape, style, seal_type, color, grain, rotation):
-        return generate_variants(text, shape, style, seal_type, color, grain, rotation)
+    def on_generate_variants(
+        mode, auto_text, polarity_label,
+        c0, c1, c2, c3, i0, i1, i2, i3,
+        shape, style, seal_type, color, grain, rotation,
+    ):
+        text, glyphs, polarity = _resolve_source(
+            mode, auto_text, polarity_label,
+            c0, c1, c2, c3, i0, i1, i2, i3,
+        )
+        # Inline to thread user_glyphs through; mirrors `generate_variants()`
+        # but builds the params dict locally so both modes work.
+        shape_code = _SHAPE_MAP.get(shape, "oval")
+        style_code = _STYLE_MAP.get(style, "baiwen")
+        seal_type_code = _TYPE_MAP.get(seal_type, "leisure")
+        try:
+            results = _gen.generate_variants(
+                text=text.strip(),
+                n=3,
+                shape=shape_code,
+                style=style_code,
+                seal_type=seal_type_code,
+                color=color,
+                grain=grain,
+                rotation=rotation,
+                seeds=[1, 2, 3],
+                user_glyphs=glyphs,
+                user_glyph_polarity=polarity,
+            )
+        except Exception as exc:
+            logging.exception("Variant generation failed")
+            return None, f"生成失败: {exc}"
+
+        first = results[0]
+        status = (
+            f"⚠ 字体已降级 → 使用: {first['font_used']}"
+            if first["font_fallback"]
+            else f"✓ 使用: {first['font_used']}"
+        )
+        level = first.get("consistency_level", 0)
+        if level:
+            status += (
+                f"\n\n**字源一致性**: "
+                f"{_CONSISTENCY_LABELS.get(level, f'L{level}')}"
+            )
+        status += (
+            "\n\n3 个版本仅石质纹理不同，文字/来源/布局完全一致。右键保存心仪版本。"
+        )
+        if first["warnings"]:
+            status += "\n\n" + "\n".join(f"⚠ {w}" for w in first["warnings"])
+
+        gallery = [
+            (r["image_preview"], f"版本 {r['seed']}（种子 {r['seed']}）")
+            for r in results
+        ]
+        return gallery, status
 
     variants_btn.click(
         fn=on_generate_variants,
         inputs=[
+            mode_input,
             text_input,
+            polarity_input,
+            upload_char_inputs[0], upload_char_inputs[1],
+            upload_char_inputs[2], upload_char_inputs[3],
+            upload_img_inputs[0], upload_img_inputs[1],
+            upload_img_inputs[2], upload_img_inputs[3],
             shape_input,
             style_input,
             seal_type_input,

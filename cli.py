@@ -147,6 +147,27 @@ def _parse_args() -> argparse.Namespace:
         help="保存版面布局调试图（蓝=cell，红=ink bbox，绿=centroid）至 {output_dir}/{text}_layout.png",
     )
 
+    # User-provided glyphs (bypass scraper)
+    p.add_argument(
+        "--user-glyph",
+        action="append",
+        metavar="CHAR=PATH",
+        help=(
+            "用自己的图片作为字源（跳过自动抓取）。"
+            "格式 CHAR=PATH，可重复。例如 --user-glyph 然=./ran.png --user-glyph 苏=./su.png。"
+            "字序以 --text 为准；未指定 --text 时按出现顺序拼接。"
+        ),
+    )
+    p.add_argument(
+        "--polarity",
+        choices=["auto", "black_on_white", "white_on_black"],
+        default="auto",
+        help=(
+            "用户上传图片的极性提示 (default: auto)。"
+            "印谱拓片（白字黑底）请用 white_on_black。"
+        ),
+    )
+
     return p.parse_args()
 
 
@@ -168,6 +189,8 @@ def _generate_one(
         # When --debug-layout is set, generate() returns the overlay alongside
         # the seal from the SAME prepare pass — avoids a second scraper+extract
         # round-trip compared to calling render_layout_debug separately.
+        user_glyphs = getattr(args, "_user_glyphs_for_text", {}).get(text)
+
         result = gen.generate(
             text=text,
             shape=args.shape,
@@ -179,6 +202,8 @@ def _generate_one(
             size=args.size,
             seed=args.seed,
             return_debug=args.debug_layout,
+            user_glyphs=user_glyphs,
+            user_glyph_polarity=getattr(args, "polarity", "auto"),
         )
 
         if args.strict_consistency and result.get("consistency_level", 0) > 2:
@@ -299,6 +324,56 @@ def main() -> None:
         if not hasattr(_tls, "gen"):
             _tls.gen = SealGenerator(no_api_cache=args.no_api_cache)
         return _tls.gen
+
+    # ── Parse --user-glyph flags (optional) ───────────────────
+    # Maps each text → list[PIL.Image] in char order, attached to args so
+    # _generate_one picks it up. Batch mode doesn't support --user-glyph
+    # (one glyph set per invocation).
+    args._user_glyphs_for_text = {}
+    if args.user_glyph:
+        if args.batch:
+            console.print(
+                "[red]--user-glyph 不支持 --batch 模式（每次调用只能提供一组字源）[/red]"
+            )
+            sys.exit(1)
+
+        from PIL import Image as _PILImage
+        glyph_map: dict[str, _PILImage.Image] = {}
+        for spec in args.user_glyph:
+            if "=" not in spec:
+                console.print(
+                    f"[red]--user-glyph 需 CHAR=PATH 格式，收到: {spec}[/red]"
+                )
+                sys.exit(1)
+            char, path = spec.split("=", 1)
+            if len(char) != 1:
+                console.print(
+                    f"[red]--user-glyph CHAR 必须是单字，收到: '{char}'[/red]"
+                )
+                sys.exit(1)
+            path_obj = Path(path)
+            if not path_obj.exists():
+                console.print(f"[red]图片不存在: {path_obj}[/red]")
+                sys.exit(1)
+            glyph_map[char] = _PILImage.open(path_obj)
+
+        # Derive or validate --text against the glyph map
+        if args.text:
+            missing = [c for c in args.text if c not in glyph_map]
+            if missing:
+                console.print(
+                    f"[red]缺少 --user-glyph: {missing}[/red]"
+                )
+                sys.exit(1)
+            resolved_text = args.text
+        else:
+            # No --text: use the order the user passed --user-glyph in
+            resolved_text = "".join(glyph_map.keys())
+            args.text = resolved_text
+
+        args._user_glyphs_for_text[resolved_text] = [
+            glyph_map[c] for c in resolved_text
+        ]
 
     if not args.text and not args.batch:
         console.print("[red]请指定 --text 或 --batch[/red]")

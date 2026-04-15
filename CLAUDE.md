@@ -150,7 +150,7 @@ Zhuwen uses max-alpha merge (`np.maximum` of char + frame layers). Baiwen uses m
 
 ```
 SealGenerator.generate()
-  → scraper.fetch_chars_consistent()
+  → scraper.fetch_chars_consistent()         # SKIPPED when user_glyphs provided
     → [single-char short-circuit with preferred source tie-break]
     → _query_glyph_list()                  # API cache → web
     → _fetch_all_candidates(n=5/10)       # image CDN cache → download
@@ -163,6 +163,8 @@ SealGenerator.generate()
   → texture.apply(style=style)            # style-aware 6-layer stone effects
   → rotate + preview
 ```
+
+**User-provided glyphs (v1)**: `SealGenerator.generate(text, user_glyphs=[...])` bypasses `_scraper` entirely — no network. Each image is fed into `extractor.extract()` with `source="字典"` (Otsu path) and empty `source_name` (no 印谱 whitelist trigger). `user_glyph_polarity="white_on_black"` RGB-inverts the upload first (for 印谱拓片). `font_used="用户提供"`, `consistency_level=0`, warnings include `使用用户上传图片作为字源`. `len(user_glyphs) == len(text)` is enforced. Mixed mode (some chars auto, some user) is v2.
 
 ## Running
 
