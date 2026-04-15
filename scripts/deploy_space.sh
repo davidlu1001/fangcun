@@ -14,8 +14,17 @@ main_sha="$(git rev-parse --short main)"
 echo "→ Syncing space-deploy from main @ ${main_sha}"
 
 # Refuse to run with uncommitted changes — they would leak into the deploy.
+# Check BOTH tracked (diff) and untracked files: untracked paths like
+# .claude/, memory/, or auto-generated CLAUDE.md indexes would otherwise
+# get swept into the deploy via `git add -A` below.
 if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "✗ Working tree is dirty. Commit or stash first." >&2
+    echo "✗ Working tree has uncommitted tracked changes. Commit or stash first." >&2
+    exit 1
+fi
+if [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+    echo "✗ Working tree has untracked files (would leak into deploy):" >&2
+    git ls-files --others --exclude-standard | sed 's/^/  /' >&2
+    echo "Remove/ignore them before deploying." >&2
     exit 1
 fi
 
@@ -23,8 +32,20 @@ original_branch="$(git symbolic-ref --short HEAD)"
 trap 'git checkout "$original_branch" 2>/dev/null || true' EXIT
 
 git checkout space-deploy
-# Replace tree with main's, then strip excluded paths.
+# space-deploy is an orphan branch with no shared history with main —
+# that's what keeps the docs/samples/ PNGs (rejected by HF Xet) out of
+# the Space repo. Don't `git reset --hard main` here: it would attach
+# space-deploy to main's history and push the PNGs.
+# Instead: pull main's tree into the working dir, drop index entries that
+# are on space-deploy but not on main, strip excluded paths, and commit.
 git checkout main -- .
+# Drop index entries for anything present on space-deploy but not on main
+# (e.g. CLAUDE.md indexes from a previous leaky deploy). Uses
+# `git diff --diff-filter=D main -- :/` to find what `git checkout`
+# couldn't reach.
+git ls-files | while IFS= read -r f; do
+    git cat-file -e "main:$f" 2>/dev/null || git rm -f --cached -- "$f" >/dev/null
+done
 git rm -rf --cached docs/samples/ >/dev/null 2>&1 || true
 rm -rf docs/samples/
 
