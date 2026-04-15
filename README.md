@@ -75,6 +75,9 @@ python cli.py --text "卢修齐" --shape square --style baiwen --type name
 # 批量（每行一个词，用于视频封面流水线）
 python cli.py --batch chars.txt --shape oval --style baiwen --type leisure --output-dir ./seals/
 
+# 批量并发（推荐 2-4 worker；每个 worker 独立 SealGenerator，过高易触发上游限流）
+python cli.py --batch chars.txt --jobs 3 --output-dir ./seals/
+
 # 缓存管理
 python cli.py --cache-info     # 查看缓存统计
 python cli.py --clear-cache    # 清除全部缓存
@@ -82,7 +85,7 @@ python cli.py --no-api-cache --text "禅"   # 跳过缓存
 
 # 调试
 python cli.py --debug --text "卢修齐" --type name  # 详细日志（候选列表、打分细节）
-python cli.py --text "禅" --debug-extract   # 保存提取中间步骤（normalized/binary/denoised/cropped）
+python cli.py --text "禅" --debug-extract   # 保存提取中间步骤（normalized/binary/denoised/cropped）；多字按 {idx}_{char}/ 嵌套
 python cli.py --text "天人合一" --debug-layout  # 保存版面调试图（cell/ink bbox/centroid 叠加）
 
 # 可复现纹理（同 seed → 字节相同输出）
